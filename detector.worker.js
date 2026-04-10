@@ -4,414 +4,120 @@ self.importScripts("https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js");
 
 const PYTHON_DETECTOR_CODE = String.raw`
 import json
-import math
-import itertools
 import numpy as np
-from skimage import color, exposure, feature, filters, measure, morphology, transform
+from skimage import color, feature, filters, measure, morphology
 
 
-def _polygon_area(points):
-    pts = np.asarray(points, dtype=float)
+def _polygon_area(points_xy):
+    pts = np.asarray(points_xy, dtype=float)
     x = pts[:, 0]
     y = pts[:, 1]
     return abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) * 0.5
 
 
-def _order_quad(points):
-    pts = np.asarray(points, dtype=float)
-    center = pts.mean(axis=0)
-    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
-    pts = pts[np.argsort(angles)]
-    start = np.argmin(pts[:, 0] + pts[:, 1])
-    pts = np.roll(pts, -start, axis=0)
-    if pts[1, 1] > pts[3, 1]:
-        pts = np.array([pts[0], pts[3], pts[2], pts[1]])
-    return pts
+def _reorder(points_xy):
+    pts = np.asarray(points_xy, dtype=float).reshape((4, 2))
+    add = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1).reshape(-1)
+
+    ordered = np.zeros((4, 2), dtype=float)
+    ordered[0] = pts[np.argmin(add)]
+    ordered[3] = pts[np.argmax(add)]
+    ordered[1] = pts[np.argmin(diff)]
+    ordered[2] = pts[np.argmax(diff)]
+    return ordered
 
 
-def _quad_angles(quad):
-    values = []
-    for idx in range(4):
-        prev_vec = quad[idx - 1] - quad[idx]
-        next_vec = quad[(idx + 1) % 4] - quad[idx]
-        denom = np.linalg.norm(prev_vec) * np.linalg.norm(next_vec)
-        if denom <= 1e-9:
-            return None
-        cosine = np.clip(np.dot(prev_vec, next_vec) / denom, -1.0, 1.0)
-        values.append(math.degrees(math.acos(cosine)))
-    return np.asarray(values)
+def _perimeter(points_xy):
+    pts = np.asarray(points_xy, dtype=float)
+    nxt = np.roll(pts, -1, axis=0)
+    return float(np.sum(np.linalg.norm(nxt - pts, axis=1)))
 
 
-def _edge_support(edge_map, quad):
-    frame_h, frame_w = edge_map.shape
-    values = []
-    for idx in range(4):
-        p0 = quad[idx]
-        p1 = quad[(idx + 1) % 4]
-        count = max(36, int(np.linalg.norm(p1 - p0) * 0.65))
-        xs = np.linspace(p0[0], p1[0], count)
-        ys = np.linspace(p0[1], p1[1], count)
-        xi = np.clip(np.rint(xs).astype(int), 0, frame_w - 1)
-        yi = np.clip(np.rint(ys).astype(int), 0, frame_h - 1)
-        values.append(float(np.mean(edge_map[yi, xi])))
-    return float(np.mean(values))
+def _largest_quad_from_contours(contours, min_area_px):
+    biggest = None
+    max_area = 0.0
 
-
-def _score_quad(points, frame_w, frame_h, min_area_ratio, edge_map):
-    quad = _order_quad(points)
-    quad[:, 0] = np.clip(quad[:, 0], 0, frame_w - 1)
-    quad[:, 1] = np.clip(quad[:, 1], 0, frame_h - 1)
-
-    area = _polygon_area(quad)
-    frame_area = max(frame_w * frame_h, 1)
-    area_ratio = area / frame_area
-    if area_ratio < min_area_ratio or area_ratio > 0.98:
-        return None
-
-    side_lengths = np.linalg.norm(np.roll(quad, -1, axis=0) - quad, axis=1)
-    diagonal = float(np.hypot(frame_w, frame_h))
-    min_side = float(np.min(side_lengths))
-    max_side = float(np.max(side_lengths))
-    if min_side < diagonal * 0.08:
-        return None
-    if max_side / max(min_side, 1e-7) > 12.0:
-        return None
-
-    angles = _quad_angles(quad)
-    if angles is None:
-        return None
-    angle_error = float(np.mean(np.abs(angles - 90.0)))
-    if angle_error > 44.0:
-        return None
-
-    bbox_w = float(np.max(quad[:, 0]) - np.min(quad[:, 0]))
-    bbox_h = float(np.max(quad[:, 1]) - np.min(quad[:, 1]))
-    bbox_area = max(bbox_w * bbox_h, 1.0)
-    fill_ratio = area / bbox_area
-    if fill_ratio < 0.31:
-        return None
-
-    pair_0 = min(side_lengths[0], side_lengths[2]) / max(max(side_lengths[0], side_lengths[2]), 1e-7)
-    pair_1 = min(side_lengths[1], side_lengths[3]) / max(max(side_lengths[1], side_lengths[3]), 1e-7)
-    opposite_similarity = float(min(pair_0, pair_1))
-
-    edge_score = float(np.clip(_edge_support(edge_map, quad), 0.0, 1.0))
-    area_score = float(np.clip((area_ratio - min_area_ratio) / max(0.75 - min_area_ratio, 1e-7), 0.0, 1.0))
-    angle_score = float(np.clip(1.0 - (angle_error / 45.0), 0.0, 1.0))
-    fill_score = float(np.clip((fill_ratio - 0.31) / 0.59, 0.0, 1.0))
-    side_score = float(np.clip(opposite_similarity, 0.0, 1.0))
-
-    confidence = (
-        (area_score * 0.35)
-        + (angle_score * 0.24)
-        + (fill_score * 0.11)
-        + (side_score * 0.11)
-        + (edge_score * 0.19)
-    )
-
-    return {
-        "confidence": float(np.clip(confidence, 0.0, 1.0)),
-        "area_ratio": float(area_ratio),
-        "corners": quad,
-    }
-
-
-def _candidate_from_contours(
-    contours,
-    frame_w,
-    frame_h,
-    min_area_ratio,
-    edge_map,
-    max_candidates=70,
-    tolerances=None,
-):
-    if tolerances is None:
-        tolerances = sorted({
-            1.8,
-            3.0,
-            4.5,
-            6.0,
-            8.0,
-            10.0,
-            13.0,
-            round(max(frame_w, frame_h) * 0.02, 2),
-            round(max(frame_w, frame_h) * 0.03, 2),
-        })
-
-    best = None
-    for contour in sorted(contours, key=lambda item: item.shape[0], reverse=True)[:max_candidates]:
-        if contour.shape[0] < 35:
+    for contour_rc in contours:
+        if contour_rc.shape[0] < 25:
             continue
 
-        for tolerance in tolerances:
-            approx = measure.approximate_polygon(contour, tolerance=tolerance)
-            if len(approx) > 1 and np.linalg.norm(approx[0] - approx[-1]) < 4.0:
-                approx = approx[:-1]
-            if len(approx) != 4:
-                continue
-
-            quad = np.column_stack((approx[:, 1], approx[:, 0]))
-            scored = _score_quad(quad, frame_w, frame_h, min_area_ratio, edge_map)
-            if scored is None:
-                continue
-
-            if best is None or scored["confidence"] > best["confidence"]:
-                best = scored
-
-    return best
-
-
-def _candidate_from_hough(edge_mask, frame_w, frame_h, min_area_ratio):
-    if np.count_nonzero(edge_mask) < frame_w * frame_h * 0.004:
-        return None
-
-    hspace, angles, distances = transform.hough_line(edge_mask)
-    if hspace.size == 0:
-        return None
-
-    peak_threshold = max(float(np.max(hspace)) * 0.36, 1.0)
-    accums, thetas, rhos = transform.hough_line_peaks(
-        hspace,
-        angles,
-        distances,
-        num_peaks=12,
-        threshold=peak_threshold,
-    )
-    if len(accums) < 4:
-        return None
-
-    vertical = []
-    horizontal = []
-    for accum, theta, rho in zip(accums, thetas, rhos):
-        line = (float(theta), float(rho), float(accum))
-        if abs(math.cos(theta)) >= abs(math.sin(theta)):
-            vertical.append(line)
-        else:
-            horizontal.append(line)
-
-    vertical = sorted(vertical, key=lambda item: item[2], reverse=True)[:5]
-    horizontal = sorted(horizontal, key=lambda item: item[2], reverse=True)[:5]
-    if len(vertical) < 2 or len(horizontal) < 2:
-        return None
-
-    support = morphology.binary_dilation(edge_mask, morphology.disk(1)).astype(float)
-    best = None
-
-    for line_left, line_right in itertools.combinations(vertical, 2):
-        if abs(line_left[1] - line_right[1]) < frame_w * 0.1:
+        contour_xy = np.column_stack((contour_rc[:, 1], contour_rc[:, 0]))
+        area = _polygon_area(contour_xy)
+        if area <= min_area_px:
             continue
 
-        for line_top, line_bottom in itertools.combinations(horizontal, 2):
-            if abs(line_top[1] - line_bottom[1]) < frame_h * 0.1:
-                continue
+        peri = _perimeter(contour_xy)
+        approx = measure.approximate_polygon(contour_xy, tolerance=max(2.0, 0.02 * peri))
+        if len(approx) > 1 and np.linalg.norm(approx[0] - approx[-1]) < 3.0:
+            approx = approx[:-1]
 
-            points = []
-            valid = True
-            for vertical_line in (line_left, line_right):
-                for horizontal_line in (line_top, line_bottom):
-                    theta_a, rho_a = vertical_line[0], vertical_line[1]
-                    theta_b, rho_b = horizontal_line[0], horizontal_line[1]
-                    cos_a, sin_a = math.cos(theta_a), math.sin(theta_a)
-                    cos_b, sin_b = math.cos(theta_b), math.sin(theta_b)
-                    det = (cos_a * sin_b) - (sin_a * cos_b)
-                    if abs(det) < 1e-8:
-                        valid = False
-                        break
-                    x = (rho_a * sin_b - sin_a * rho_b) / det
-                    y = (cos_a * rho_b - rho_a * cos_b) / det
-                    points.append([x, y])
-                if not valid:
-                    break
+        if len(approx) == 4 and area > max_area:
+            biggest = _reorder(approx)
+            max_area = area
 
-            if not valid:
-                continue
-
-            quad = np.asarray(points, dtype=float)
-            if np.any(quad[:, 0] < -frame_w * 0.2) or np.any(quad[:, 0] > frame_w * 1.2):
-                continue
-            if np.any(quad[:, 1] < -frame_h * 0.2) or np.any(quad[:, 1] > frame_h * 1.2):
-                continue
-
-            scored = _score_quad(quad, frame_w, frame_h, min_area_ratio, support)
-            if scored is None:
-                continue
-            if best is None or scored["confidence"] > best["confidence"]:
-                best = scored
-
-    return best
+    return biggest, max_area
 
 
-def _expand_quad(quad, scale, frame_w, frame_h):
-    center = np.mean(quad, axis=0)
-    expanded = center + ((quad - center) * scale)
-    expanded[:, 0] = np.clip(expanded[:, 0], 0, frame_w - 1)
-    expanded[:, 1] = np.clip(expanded[:, 1], 0, frame_h - 1)
-    return expanded
-
-
-def _get_tracking_roi(gray, prev_corners):
+def _opencv_style_detect(gray, mode):
     frame_h, frame_w = gray.shape
-    quad = np.asarray(prev_corners, dtype=float)
-    if quad.shape != (4, 2):
-        return None
 
-    quad[:, 0] = np.clip(quad[:, 0], 0, frame_w - 1)
-    quad[:, 1] = np.clip(quad[:, 1], 0, frame_h - 1)
-    expanded = _expand_quad(quad, 1.32, frame_w, frame_h)
-
-    min_x = int(max(0, np.floor(np.min(expanded[:, 0]))))
-    max_x = int(min(frame_w, np.ceil(np.max(expanded[:, 0])) + 1))
-    min_y = int(max(0, np.floor(np.min(expanded[:, 1]))))
-    max_y = int(min(frame_h, np.ceil(np.max(expanded[:, 1])) + 1))
-
-    if (max_x - min_x) < 70 or (max_y - min_y) < 70:
-        return None
-
-    roi = gray[min_y:max_y, min_x:max_x]
-    return roi, min_x, min_y
-
-
-def _detect_quad(gray, mode, tracked=False):
-    frame_h, frame_w = gray.shape
-    min_area_ratio = 0.07 if mode == "upload" else (0.08 if tracked else 0.09)
-
-    stride = 1 if tracked else (2 if mode == "camera" and max(frame_w, frame_h) >= 400 else 1)
+    # Downsample in camera mode for lower latency and then scale corners back.
+    stride = 2 if mode == "camera" and max(frame_w, frame_h) >= 540 else 1
     if stride > 1:
         work_gray = gray[::stride, ::stride]
-        work_h, work_w = work_gray.shape
     else:
         work_gray = gray
-        work_h, work_w = frame_h, frame_w
 
-    blur_sigma = 1.0 if mode == "camera" else 1.25
-    base = filters.gaussian(work_gray, sigma=blur_sigma, preserve_range=True)
-    
-    # White-on-white booster (unsharp mask via heavy blur subtraction)
-    bg = filters.gaussian(work_gray, sigma=12.0 if mode == "camera" else 20.0, preserve_range=True)
-    flat_diff = exposure.rescale_intensity(base - bg, out_range=(0.0, 1.0))
+    work_h, work_w = work_gray.shape
+    min_area_ratio = 5000.0 / (640.0 * 480.0)
+    min_area_px = max(900.0, (work_w * work_h) * min_area_ratio)
 
-    if mode == "camera":
-        variants = [
-            flat_diff,
-            exposure.equalize_adapthist(base, clip_limit=0.02),
-        ]
-    else:
-        variants = [
-            flat_diff,
-            exposure.equalize_adapthist(base, clip_limit=0.016),
-            exposure.adjust_sigmoid(base, cutoff=0.5, gain=9)
-        ]
+    img_blur = filters.gaussian(work_gray, sigma=1.0, preserve_range=True)
 
-    best = None
-    strongest_edges = None
-    strongest_density = 0.0
+    # OpenCV tutorial uses trackbars around 200/200; this calibrated pair behaves similarly in normalized domain.
+    canny_low = 0.10 if mode == "camera" else 0.12
+    canny_high = 0.24 if mode == "camera" else 0.28
+    img_threshold = feature.canny(img_blur, sigma=1.0, low_threshold=canny_low, high_threshold=canny_high)
 
-    contour_budget = 36 if tracked else 70
-    tracked_tolerances = [1.8, 3.0, 4.5, 6.0, 8.0] if tracked else None
+    kernel = np.ones((5, 5), dtype=bool)
+    img_dilate = morphology.binary_dilation(img_threshold, kernel)
+    img_dilate = morphology.binary_dilation(img_dilate, kernel)
+    img_threshold = morphology.binary_erosion(img_dilate, kernel)
 
-    for variant in variants:
-        gradient = filters.scharr(variant)
-        high = float(np.quantile(gradient, 0.92))
-        low = float(np.quantile(gradient, 0.7))
-        if high <= 1e-7:
-            continue
+    contours = measure.find_contours(img_threshold.astype(float), 0.5)
+    biggest, max_area = _largest_quad_from_contours(contours, min_area_px)
+    if biggest is None:
+        return None
 
-        edge_source = feature.canny(
-            variant,
-            sigma=1.1,
-            low_threshold=max(low * 0.7, 0.002),
-            high_threshold=max(high, 0.01),
-        )
+    if stride > 1:
+        biggest *= stride
 
-        edge_mask = morphology.binary_dilation(edge_source, morphology.disk(1))
-        edge_mask = morphology.binary_closing(edge_mask, morphology.disk(3) if mode == "upload" else morphology.disk(2))
-        edge_mask = morphology.remove_small_objects(edge_mask, min_size=max(40, int(work_w * work_h * 0.0015)))
+    biggest[:, 0] = np.clip(biggest[:, 0], 0, frame_w - 1)
+    biggest[:, 1] = np.clip(biggest[:, 1], 0, frame_h - 1)
 
-        density = float(np.count_nonzero(edge_mask)) / max(work_w * work_h, 1)
-        if density > strongest_density:
-            strongest_density = density
-            strongest_edges = edge_mask
+    area_ratio = float(max_area) / max((work_w * work_h), 1)
+    confidence = float(np.clip((area_ratio - 0.015) / 0.42, 0.0, 1.0))
 
-        support = morphology.binary_dilation(edge_mask, morphology.disk(1)).astype(float)
-        candidate = _candidate_from_contours(
-            measure.find_contours(edge_mask.astype(float), 0.5),
-            work_w,
-            work_h,
-            min_area_ratio,
-            support,
-            max_candidates=contour_budget,
-            tolerances=tracked_tolerances,
-        )
-        if candidate is not None and (best is None or candidate["confidence"] > best["confidence"]):
-            best = candidate
-
-        bright_threshold = min(max(max(float(filters.threshold_otsu(variant)), float(np.quantile(variant, 0.6)) * 0.94), 0.25), 0.95)
-        paper_mask = variant >= bright_threshold
-        paper_mask = morphology.binary_closing(paper_mask, morphology.disk(3 if stride > 1 else 5))
-        paper_mask = morphology.binary_opening(paper_mask, morphology.disk(2))
-        paper_mask = morphology.remove_small_holes(paper_mask, area_threshold=max(100, int(work_w * work_h * 0.006)))
-        paper_mask = morphology.remove_small_objects(paper_mask, min_size=max(120, int(work_w * work_h * 0.01)))
-
-        if np.any(paper_mask):
-            support2 = np.maximum(support, np.clip(gradient * 4.0, 0.0, 1.0))
-            candidate2 = _candidate_from_contours(
-                measure.find_contours(paper_mask.astype(float), 0.5),
-                work_w,
-                work_h,
-                min_area_ratio,
-                support2,
-                max_candidates=contour_budget,
-                tolerances=tracked_tolerances,
-            )
-            if candidate2 is not None and (best is None or candidate2["confidence"] > best["confidence"]):
-                best = candidate2
-
-    if mode != "camera" and (best is None or best["confidence"] < 0.5) and strongest_edges is not None:
-        hough_candidate = _candidate_from_hough(strongest_edges, work_w, work_h, min_area_ratio)
-        if hough_candidate is not None and (best is None or hough_candidate["confidence"] > best["confidence"]):
-            best = hough_candidate
-
-    if best is not None and stride > 1:
-        best["corners"] *= stride
-
-    return best
+    return {
+        "corners": biggest,
+        "area_ratio": float(np.clip(area_ratio, 0.0, 1.0)),
+        "confidence": confidence,
+    }
 
 
 def detect_document_json(pixels, width, height, mode="upload", hints_json=""):
     image = np.asarray(pixels, dtype=np.uint8).reshape((height, width, 4))
     rgb = image[..., :3].astype(np.float32) / 255.0
     gray = color.rgb2gray(rgb)
-    gray = exposure.rescale_intensity(gray, in_range="image", out_range=(0.0, 1.0))
+    candidate = _opencv_style_detect(gray, mode)
 
-    hints = {}
-    if hints_json:
-        try:
-            hints = json.loads(hints_json)
-        except Exception:
-            hints = {}
-
-    candidate = None
-    if mode == "camera" and isinstance(hints, dict):
-        prev_corners = hints.get("prev_corners")
-        if isinstance(prev_corners, list) and len(prev_corners) == 4:
-            roi_data = _get_tracking_roi(gray, prev_corners)
-            if roi_data is not None:
-                roi_gray, offset_x, offset_y = roi_data
-                candidate = _detect_quad(roi_gray, mode, tracked=True)
-                if candidate is not None:
-                    candidate["corners"][:, 0] += float(offset_x)
-                    candidate["corners"][:, 1] += float(offset_y)
-
-    if candidate is None:
-        candidate = _detect_quad(gray, mode, tracked=False)
-
-    min_confidence = 0.34 if mode == "upload" else 0.4
-
-    if candidate is None or candidate["confidence"] < min_confidence:
+    min_confidence = 0.18 if mode == "upload" else 0.16
+    if candidate is None or float(candidate["confidence"]) < min_confidence:
         return json.dumps({
             "found": False,
-            "confidence": 0.0 if candidate is None else round(float(candidate["confidence"]), 4),
-            "area_ratio": 0.0 if candidate is None else round(float(candidate["area_ratio"]), 4),
+            "confidence": 0.0 if candidate is None else round(float(candidate.get("confidence", 0.0)), 4),
+            "area_ratio": 0.0 if candidate is None else round(float(candidate.get("area_ratio", 0.0)), 4),
             "corners": [],
             "frame_width": int(width),
             "frame_height": int(height),
@@ -420,8 +126,8 @@ def detect_document_json(pixels, width, height, mode="upload", hints_json=""):
     corners = [[round(float(x), 3), round(float(y), 3)] for x, y in candidate["corners"]]
     return json.dumps({
         "found": True,
-        "confidence": round(float(candidate["confidence"]), 4),
-        "area_ratio": round(float(candidate["area_ratio"]), 4),
+        "confidence": round(float(candidate.get("confidence", 0.0)), 4),
+        "area_ratio": round(float(candidate.get("area_ratio", 0.0)), 4),
         "corners": corners,
         "frame_width": int(width),
         "frame_height": int(height),
