@@ -447,6 +447,9 @@ async function runCameraDetectionTick() {
   state.frameCtx.drawImage(refs.cameraPreview, 0, 0, state.frameCanvas.width, state.frameCanvas.height);
 
   state.runningDetection = true;
+  let triggerCrop = false;
+  let cropCorners = null;
+
   try {
     const corners = detectCorners(state.frameCanvas);
     if (corners) {
@@ -465,24 +468,34 @@ async function runCameraDetectionTick() {
       if (state.stableFrames >= 4 && Date.now() > state.cooldownUntil) {
         state.cooldownUntil = Date.now() + 2600;
         state.stableFrames = 0;
+        triggerCrop = true;
+        cropCorners = corners;
         setCameraBadge("Auto-crop...");
-        await autoCropCurrentFrame(corners);
-        window.setTimeout(() => {
-          if (state.cameraStream) {
-            setCameraBadge("Aktivno");
-          }
-        }, 900);
       }
     } else {
       state.stableFrames = 0;
-      clearCameraOverlay();
+      // Zadrzi poslednji overlay kratko da ne treperi, samo resetuj kad dugo nema
+      if (!state.lastCameraCorners) {
+        clearCameraOverlay();
+      }
       setDetection("Cekam dokument");
     }
   } catch (error) {
     console.error("Camera detection error", error);
     setDetection("Greska detekcije");
   } finally {
+    // Lokot se pusta odmah — petlja nastavlja detekciju bez obzira na crop
     state.runningDetection = false;
+  }
+
+  // Auto-crop se izvrsava VAN lokota da detekacija tece neprekidno
+  if (triggerCrop) {
+    await autoCropCurrentFrame(cropCorners);
+    window.setTimeout(() => {
+      if (state.cameraStream) {
+        setCameraBadge("Aktivno");
+      }
+    }, 900);
   }
 }
 
