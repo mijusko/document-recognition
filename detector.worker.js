@@ -232,18 +232,36 @@ def _candidate_from_hough(edge_mask, frame_w, frame_h, min_area_ratio):
     return best
 
 
-def _detect_quad(gray, mode):
+def _detect_quad(gray, orig_w, orig_h, mode):
     frame_h, frame_w = gray.shape
-    min_area_ratio = 0.07 if mode == "upload" else 0.1
+    min_area_ratio = 0.07 if mode == "upload" else 0.09
 
-    blur_sigma = 1.1 if mode == "camera" else 1.25
-    base = filters.gaussian(gray, sigma=blur_sigma, preserve_range=True)
+    stride = 2 if mode == "camera" and max(frame_w, frame_h) >= 400 else 1
+    if stride > 1:
+        work_gray = gray[::stride, ::stride]
+        work_h, work_w = work_gray.shape
+    else:
+        work_gray = gray
+        work_h, work_w = frame_h, frame_w
+
+    blur_sigma = 1.0 if mode == "camera" else 1.25
+    base = filters.gaussian(work_gray, sigma=blur_sigma, preserve_range=True)
     
-    variants = [
-        exposure.equalize_adapthist(base, clip_limit=0.018 if mode == "camera" else 0.016),
-    ]
-    if mode != "camera":
-        variants.append(exposure.adjust_sigmoid(base, cutoff=0.5, gain=9))
+    # White-on-white booster (unsharp mask via heavy blur subtraction)
+    bg = filters.gaussian(work_gray, sigma=12.0 if mode == "camera" else 20.0, preserve_range=True)
+    flat_diff = exposure.rescale_intensity(base - bg, out_range=(0.0, 1.0))
+
+    if mode == "camera":
+        variants = [
+            flat_diff,
+            exposure.equalize_adapthist(base, clip_limit=0.02),
+        ]
+    else:
+        variants = [
+            flat_diff,
+            exposure.equalize_adapthist(base, clip_limit=0.016),
+            exposure.adjust_sigmoid(base, cutoff=0.5, gain=9)
+        ]
 
     best = None
     strongest_edges = None
@@ -258,16 +276,16 @@ def _detect_quad(gray, mode):
 
         edge_source = feature.canny(
             variant,
-            sigma=1.1 if mode == "camera" else 1.35,
+            sigma=1.1,
             low_threshold=max(low * 0.7, 0.002),
             high_threshold=max(high, 0.01),
         )
 
         edge_mask = morphology.binary_dilation(edge_source, morphology.disk(1))
-        edge_mask = morphology.binary_closing(edge_mask, morphology.disk(3))
-        edge_mask = morphology.remove_small_objects(edge_mask, min_size=max(70, int(frame_w * frame_h * 0.0015)))
+        edge_mask = morphology.binary_closing(edge_mask, morphology.disk(3) if mode == "upload" else morphology.disk(2))
+        edge_mask = morphology.remove_small_objects(edge_mask, min_size=max(40, int(work_w * work_h * 0.0015)))
 
-        density = float(np.count_nonzero(edge_mask)) / max(frame_w * frame_h, 1)
+        density = float(np.count_nonzero(edge_mask)) / max(work_w * work_h, 1)
         if density > strongest_density:
             strongest_density = density
             strongest_edges = edge_mask
@@ -275,8 +293,8 @@ def _detect_quad(gray, mode):
         support = morphology.binary_dilation(edge_mask, morphology.disk(1)).astype(float)
         candidate = _candidate_from_contours(
             measure.find_contours(edge_mask.astype(float), 0.5),
-            frame_w,
-            frame_h,
+            work_w,
+            work_h,
             min_area_ratio,
             support,
         )
@@ -285,17 +303,17 @@ def _detect_quad(gray, mode):
 
         bright_threshold = min(max(max(float(filters.threshold_otsu(variant)), float(np.quantile(variant, 0.6)) * 0.94), 0.25), 0.95)
         paper_mask = variant >= bright_threshold
-        paper_mask = morphology.binary_closing(paper_mask, morphology.disk(5))
+        paper_mask = morphology.binary_closing(paper_mask, morphology.disk(3 if stride > 1 else 5))
         paper_mask = morphology.binary_opening(paper_mask, morphology.disk(2))
-        paper_mask = morphology.remove_small_holes(paper_mask, area_threshold=max(200, int(frame_w * frame_h * 0.006)))
-        paper_mask = morphology.remove_small_objects(paper_mask, min_size=max(220, int(frame_w * frame_h * 0.01)))
+        paper_mask = morphology.remove_small_holes(paper_mask, area_threshold=max(100, int(work_w * work_h * 0.006)))
+        paper_mask = morphology.remove_small_objects(paper_mask, min_size=max(120, int(work_w * work_h * 0.01)))
 
         if np.any(paper_mask):
-            support2 = np.maximum(support, np.clip(filters.scharr(variant) * 4.0, 0.0, 1.0))
+            support2 = np.maximum(support, np.clip(gradient * 4.0, 0.0, 1.0))
             candidate2 = _candidate_from_contours(
                 measure.find_contours(paper_mask.astype(float), 0.5),
-                frame_w,
-                frame_h,
+                work_w,
+                work_h,
                 min_area_ratio,
                 support2,
             )
@@ -303,9 +321,12 @@ def _detect_quad(gray, mode):
                 best = candidate2
 
     if mode != "camera" and (best is None or best["confidence"] < 0.5) and strongest_edges is not None:
-        hough_candidate = _candidate_from_hough(strongest_edges, frame_w, frame_h, min_area_ratio)
+        hough_candidate = _candidate_from_hough(strongest_edges, work_w, work_h, min_area_ratio)
         if hough_candidate is not None and (best is None or hough_candidate["confidence"] > best["confidence"]):
             best = hough_candidate
+
+    if best is not None and stride > 1:
+        best["corners"] *= stride
 
     return best
 
@@ -316,7 +337,7 @@ def detect_document_json(pixels, width, height, mode="upload"):
     gray = color.rgb2gray(rgb)
     gray = exposure.rescale_intensity(gray, in_range="image", out_range=(0.0, 1.0))
 
-    candidate = _detect_quad(gray, mode)
+    candidate = _detect_quad(gray, width, height, mode)
     min_confidence = 0.34 if mode == "upload" else 0.4
 
     if candidate is None or candidate["confidence"] < min_confidence:
