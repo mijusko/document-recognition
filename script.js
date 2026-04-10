@@ -1,1098 +1,411 @@
-const WORKER_URL = "./detector.worker.js";
+import "https://cdn.jsdelivr.net/npm/scanbot-web-sdk@8.1.1/bundle/ScanbotSDK.ui2.min.js";
+
+const ENGINE_PATH = "https://cdn.jsdelivr.net/npm/scanbot-web-sdk@8.1.1/bundle/bin/complete/";
+const LICENSE_KEY = "";
 
 const state = {
-	worker: null,
-	workerReady: false,
-	pendingDetections: new Map(),
-	workerRequestSeq: 1,
-	activeMode: "upload",
-	cameraStream: null,
-	cameraLoopId: null,
-	detectionInFlight: false,
-	lastCameraDetectionAt: 0,
-	cameraDetectionInterval: 135,
-	lastDetectionDurationMs: 0,
-	smoothedCameraCorners: null,
-	lastCameraResult: null,
-	lastUploadResult: null,
-	uploadObjectUrl: null,
-	pendingUploadDetection: false,
-	uploadImageLoaded: false,
-	missingContourFrames: 0,
-	maxMissingContourFrames: 12,
-	fullscreenOpen: false,
-	captureInFlight: false,
-	closingFullscreen: false,
+  sdk: null,
+  scannerHandle: null,
+  sdkReady: false,
+  lastUploadPolygon: [],
 };
 
 const refs = {
-	fileInput: document.querySelector("#fileInput"),
-	fileMeta: document.querySelector("#fileMeta"),
-	cameraToggle: document.querySelector("#cameraToggle"),
-	cameraHint: document.querySelector("#cameraHint"),
-	uploadPreview: document.querySelector("#uploadPreview"),
-	cameraPreview: document.querySelector("#cameraPreview"),
-	uploadOverlay: document.querySelector("#uploadOverlay"),
-	cameraOverlay: document.querySelector("#cameraOverlay"),
-	uploadFrame: document.querySelector("#uploadFrame"),
-	cameraFrame: document.querySelector("#cameraFrame"),
-	uploadPlaceholder: document.querySelector("#uploadPlaceholder"),
-	cameraPlaceholder: document.querySelector("#cameraPlaceholder"),
-	uploadStage: document.querySelector("#uploadStage"),
-	cameraStage: document.querySelector("#cameraStage"),
-	engineState: document.querySelector("#engineState"),
-	detectionState: document.querySelector("#detectionState"),
-	confidenceState: document.querySelector("#confidenceState"),
-	activeModeLabel: document.querySelector("#activeModeLabel"),
-	frameSizeLabel: document.querySelector("#frameSizeLabel"),
-	cornersLabel: document.querySelector("#cornersLabel"),
-	areaLabel: document.querySelector("#areaLabel"),
-	liveBadge: document.querySelector("#liveBadge"),
-	analysisCanvas: document.querySelector("#analysisCanvas"),
-	modeButtons: [...document.querySelectorAll(".mode-button")],
-	uploadPane: document.querySelector("#uploadPane"),
-	cameraPane: document.querySelector("#cameraPane"),
-	fullscreenScanner: document.querySelector("#fullscreenScanner"),
-	fsCameraFrame: document.querySelector("#fsCameraFrame"),
-	fsCameraPreview: document.querySelector("#fsCameraPreview"),
-	fsCameraOverlay: document.querySelector("#fsCameraOverlay"),
-	fsCloseBtn: document.querySelector("#fsCloseBtn"),
-	fsCaptureBtn: document.querySelector("#fsCaptureBtn"),
-	fsStatus: document.querySelector("#fsStatus"),
+  sdkState: document.querySelector("#sdkState"),
+  activityState: document.querySelector("#activityState"),
+  detectionState: document.querySelector("#detectionState"),
+  startCameraBtn: document.querySelector("#startCameraBtn"),
+  stopCameraBtn: document.querySelector("#stopCameraBtn"),
+  fileInput: document.querySelector("#fileInput"),
+  fileLabel: document.querySelector("#fileLabel"),
+  cameraBadge: document.querySelector("#cameraBadge"),
+  uploadBadge: document.querySelector("#uploadBadge"),
+  scannerContainer: document.querySelector("#scannerContainer"),
+  uploadStage: document.querySelector("#uploadStage"),
+  uploadPreview: document.querySelector("#uploadPreview"),
+  uploadOverlay: document.querySelector("#uploadOverlay"),
+  uploadPlaceholder: document.querySelector("#uploadPlaceholder"),
+  originalResult: document.querySelector("#originalResult"),
+  croppedResult: document.querySelector("#croppedResult"),
+  autoCropContainer: document.querySelector("#autoCropContainer"),
 };
 
-function setEngineState(message) {
-	refs.engineState.textContent = message;
+function setSdkState(text) {
+  refs.sdkState.textContent = text;
 }
 
-function setDetectionState(message) {
-	refs.detectionState.textContent = message;
-	if (refs.fsStatus) {
-		refs.fsStatus.textContent = message;
-	}
+function setActivity(text) {
+  refs.activityState.textContent = text;
 }
 
-function setConfidence(value) {
-	refs.confidenceState.textContent = value;
+function setDetection(text) {
+  refs.detectionState.textContent = text;
 }
 
-function setInsightValues({ mode, frameWidth, frameHeight, corners, areaRatio }) {
-	refs.activeModeLabel.textContent = mode === "camera" ? "Kamera" : "Slika";
-	refs.frameSizeLabel.textContent = frameWidth && frameHeight ? `${frameWidth} x ${frameHeight}` : "-";
-	refs.cornersLabel.textContent = Array.isArray(corners) && corners.length ? `${corners.length} / 4` : "-";
-	refs.areaLabel.textContent = areaRatio ? `${Math.round(areaRatio * 100)}% kadra` : "-";
+function setCameraBadge(text) {
+  refs.cameraBadge.textContent = text;
 }
 
-function setMode(mode) {
-	if (mode === "upload" && state.fullscreenOpen) {
-		void closeFullscreenScanner();
-	}
+function setUploadBadge(text) {
+  refs.uploadBadge.textContent = text;
+}
 
-	state.activeMode = mode;
-	refs.modeButtons.forEach((button) => {
-		button.classList.toggle("is-active", button.dataset.mode === mode);
-	});
+function normalizePolygonPoint(point) {
+  if (Array.isArray(point) && point.length >= 2) {
+    return { x: Number(point[0]), y: Number(point[1]) };
+  }
 
-	refs.uploadPane.classList.toggle("is-hidden", mode !== "upload");
-	refs.cameraPane.classList.toggle("is-hidden", mode !== "camera");
-	refs.uploadStage.classList.toggle("is-active", mode === "upload");
-	refs.cameraStage.classList.toggle("is-active", mode === "camera");
-	refs.liveBadge.textContent = mode === "camera" ? "Live kamera" : "Upload rezim";
+  if (point && typeof point === "object" && "x" in point && "y" in point) {
+    return { x: Number(point.x), y: Number(point.y) };
+  }
 
-	if (mode === "upload") {
-		setInsightValues({
-			mode,
-			frameWidth: state.lastUploadResult?.frame_width,
-			frameHeight: state.lastUploadResult?.frame_height,
-			corners: state.lastUploadResult?.corners,
-			areaRatio: state.lastUploadResult?.area_ratio,
-		});
-		redrawUploadOverlay();
-		return;
-	}
-
-	setInsightValues({
-		mode,
-		frameWidth: state.lastCameraResult?.frame_width,
-		frameHeight: state.lastCameraResult?.frame_height,
-		corners: state.lastCameraResult?.corners,
-		areaRatio: state.lastCameraResult?.area_ratio,
-	});
-
-	setDetectionState("Klikni na dugme za full-screen kameru");
-	setConfidence("-");
+  return null;
 }
 
 function getContainRect(sourceWidth, sourceHeight, containerWidth, containerHeight) {
-	if (!sourceWidth || !sourceHeight || !containerWidth || !containerHeight) {
-		return { x: 0, y: 0, width: containerWidth, height: containerHeight };
-	}
+  if (!sourceWidth || !sourceHeight || !containerWidth || !containerHeight) {
+    return { x: 0, y: 0, width: containerWidth, height: containerHeight };
+  }
 
-	const sourceRatio = sourceWidth / sourceHeight;
-	const containerRatio = containerWidth / containerHeight;
+  const sourceRatio = sourceWidth / sourceHeight;
+  const containerRatio = containerWidth / containerHeight;
 
-	if (sourceRatio > containerRatio) {
-		const width = containerWidth;
-		const height = width / sourceRatio;
-		return { x: 0, y: (containerHeight - height) / 2, width, height };
-	}
+  if (sourceRatio > containerRatio) {
+    const width = containerWidth;
+    const height = width / sourceRatio;
+    return { x: 0, y: (containerHeight - height) / 2, width, height };
+  }
 
-	const height = containerHeight;
-	const width = height * sourceRatio;
-	return { x: (containerWidth - width) / 2, y: 0, width, height };
+  const height = containerHeight;
+  const width = height * sourceRatio;
+  return { x: (containerWidth - width) / 2, y: 0, width, height };
 }
 
-function setupCanvasForFrame(canvas, frame) {
-	const bounds = frame.getBoundingClientRect();
-	const ratio = window.devicePixelRatio || 1;
-	canvas.width = Math.max(1, Math.round(bounds.width * ratio));
-	canvas.height = Math.max(1, Math.round(bounds.height * ratio));
-	const context = canvas.getContext("2d");
-	context.setTransform(ratio, 0, 0, ratio, 0, 0);
-	context.clearRect(0, 0, bounds.width, bounds.height);
-	return { context, width: bounds.width, height: bounds.height };
+function setupOverlayCanvas() {
+  const bounds = refs.uploadStage.getBoundingClientRect();
+  const ratio = window.devicePixelRatio || 1;
+  const canvas = refs.uploadOverlay;
+
+  canvas.width = Math.max(1, Math.round(bounds.width * ratio));
+  canvas.height = Math.max(1, Math.round(bounds.height * ratio));
+
+  const context = canvas.getContext("2d");
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, bounds.width, bounds.height);
+
+  return { context, width: bounds.width, height: bounds.height };
 }
 
-function drawCorners({ canvas, frame, frameWidth, frameHeight, corners, hold }) {
-	const { context, width, height } = setupCanvasForFrame(canvas, frame);
-	if (!Array.isArray(corners) || corners.length !== 4) {
-		return;
-	}
+function drawUploadOverlay() {
+  const points = state.lastUploadPolygon;
+  const preview = refs.uploadPreview;
+  const canvas = setupOverlayCanvas();
 
-	const mediaRect = getContainRect(frameWidth, frameHeight, width, height);
-	const scaled = corners.map(([x, y]) => ({
-		x: mediaRect.x + (x / frameWidth) * mediaRect.width,
-		y: mediaRect.y + (y / frameHeight) * mediaRect.height,
-	}));
+  if (!Array.isArray(points) || points.length < 4 || !preview.naturalWidth || !preview.naturalHeight) {
+    return;
+  }
 
-	context.save();
-	context.lineJoin = "round";
-	context.lineCap = "round";
-	context.strokeStyle = hold ? "rgba(104, 240, 178, 0.52)" : "rgba(104, 240, 178, 0.98)";
-	context.fillStyle = hold ? "rgba(104, 240, 178, 0.08)" : "rgba(104, 240, 178, 0.12)";
-	context.lineWidth = hold ? 3 : 4;
-	context.shadowColor = "rgba(104, 240, 178, 0.4)";
-	context.shadowBlur = hold ? 8 : 16;
+  const normalized = points
+    .map(normalizePolygonPoint)
+    .filter((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
 
-	context.beginPath();
-	scaled.forEach((point, index) => {
-		if (index === 0) {
-			context.moveTo(point.x, point.y);
-			return;
-		}
-		context.lineTo(point.x, point.y);
-	});
-	context.closePath();
-	context.fill();
-	context.stroke();
+  if (normalized.length < 4) {
+    return;
+  }
 
-	scaled.forEach((point, index) => {
-		context.beginPath();
-		context.fillStyle = index === 0 ? "rgba(212, 107, 41, 0.95)" : "rgba(255, 248, 239, 0.95)";
-		context.arc(point.x, point.y, hold ? 4 : 5, 0, Math.PI * 2);
-		context.fill();
-	});
+  const mediaRect = getContainRect(
+    preview.naturalWidth,
+    preview.naturalHeight,
+    canvas.width,
+    canvas.height,
+  );
 
-	context.restore();
+  const scaled = normalized.map((point) => ({
+    x: mediaRect.x + (point.x * mediaRect.width),
+    y: mediaRect.y + (point.y * mediaRect.height),
+  }));
+
+  canvas.context.save();
+  canvas.context.lineJoin = "round";
+  canvas.context.lineCap = "round";
+  canvas.context.lineWidth = 4;
+  canvas.context.strokeStyle = "rgba(115, 255, 215, 0.96)";
+  canvas.context.fillStyle = "rgba(115, 255, 215, 0.16)";
+  canvas.context.shadowColor = "rgba(115, 255, 215, 0.44)";
+  canvas.context.shadowBlur = 14;
+
+  canvas.context.beginPath();
+  scaled.forEach((point, index) => {
+    if (index === 0) {
+      canvas.context.moveTo(point.x, point.y);
+      return;
+    }
+    canvas.context.lineTo(point.x, point.y);
+  });
+  canvas.context.closePath();
+  canvas.context.fill();
+  canvas.context.stroke();
+
+  scaled.forEach((point, index) => {
+    canvas.context.beginPath();
+    canvas.context.arc(point.x, point.y, 5, 0, Math.PI * 2);
+    canvas.context.fillStyle = index === 0 ? "rgba(255, 125, 58, 0.98)" : "rgba(250, 255, 253, 0.98)";
+    canvas.context.fill();
+  });
+
+  canvas.context.restore();
 }
 
-function redrawUploadOverlay() {
-	if (!state.lastUploadResult?.found) {
-		const canvas = refs.uploadOverlay;
-		const { context } = setupCanvasForFrame(canvas, refs.uploadFrame);
-		context.clearRect(0, 0, canvas.width, canvas.height);
-		return;
-	}
+async function initSdk() {
+  if (state.sdkReady && state.sdk) {
+    return state.sdk;
+  }
 
-	drawCorners({
-		canvas: refs.uploadOverlay,
-		frame: refs.uploadFrame,
-		frameWidth: state.lastUploadResult.frame_width,
-		frameHeight: state.lastUploadResult.frame_height,
-		corners: state.lastUploadResult.corners,
-		hold: false,
-	});
+  setSdkState("Ucitavam Scanbot SDK...");
+
+  state.sdk = await ScanbotSDK.initialize({
+    enginePath: ENGINE_PATH,
+    licenseKey: LICENSE_KEY,
+    onComplete(error) {
+      if (error) {
+        console.error("Scanbot init error", error);
+        setSdkState(`SDK greska: ${error.message || error}`);
+      }
+    },
+  });
+
+  state.sdkReady = true;
+  setSdkState("SDK spreman");
+  return state.sdk;
 }
 
-function redrawCameraOverlay({ hold = false } = {}) {
-	const surface = getActiveCameraSurface();
-	const result = state.lastCameraResult;
-	if (!result?.corners?.length) {
-		const { context } = setupCanvasForFrame(surface.overlay, surface.frame);
-		context.clearRect(0, 0, surface.overlay.width, surface.overlay.height);
-		return;
-	}
+async function stopCameraScanner() {
+  if (state.scannerHandle) {
+    state.scannerHandle.dispose();
+    state.scannerHandle = null;
+  }
 
-	drawCorners({
-		canvas: surface.overlay,
-		frame: surface.frame,
-		frameWidth: result.frame_width,
-		frameHeight: result.frame_height,
-		corners: result.corners,
-		hold,
-	});
+  refs.scannerContainer.innerHTML = "<div class=\"scanner-placeholder\">Pokreni kameru da vidis live ivice i auto-capture.</div>";
+  refs.startCameraBtn.disabled = false;
+  refs.stopCameraBtn.disabled = true;
+  setCameraBadge("Neaktivno");
+  setActivity("Kamera zaustavljena");
 }
 
-function getActiveCameraSurface() {
-	if (state.fullscreenOpen) {
-		return {
-			preview: refs.fsCameraPreview,
-			overlay: refs.fsCameraOverlay,
-			frame: refs.fsCameraFrame,
-		};
-	}
+async function startCameraScanner() {
+  try {
+    await initSdk();
+    await stopCameraScanner();
 
-	return {
-		preview: refs.cameraPreview,
-		overlay: refs.cameraOverlay,
-		frame: refs.cameraFrame,
-	};
+    refs.scannerContainer.innerHTML = "";
+    refs.startCameraBtn.disabled = true;
+    refs.stopCameraBtn.disabled = false;
+    setCameraBadge("Aktivno");
+    setActivity("Pokrecem live skener");
+
+    state.scannerHandle = await state.sdk.createDocumentScanner({
+      containerId: "scannerContainer",
+      autoCaptureEnabled: true,
+      autoCaptureSensitivity: 0.72,
+      scannerConfiguration: {
+        parameters: {
+          acceptedAngleScore: 60,
+          acceptedSizeScore: 60,
+          ignoreOrientationMismatch: true,
+        },
+      },
+      style: {
+        outline: {
+          polygon: {
+            strokeWidthCapturing: 4,
+            fillCapturing: "rgba(115, 255, 215, 0.14)",
+            strokeCapturing: "#73ffd7",
+            strokeWidthSearching: 3,
+            fillSearching: "rgba(255, 146, 93, 0.1)",
+            strokeSearching: "#ff925d",
+          },
+        },
+      },
+      onDocumentDetected: async (response) => {
+        const detectionResult = response?.result?.detectionResult;
+        setDetection(detectionResult?.status || "OK");
+        setActivity("Dokument detektovan (kamera)");
+        setCameraBadge("Detektovano");
+
+        const displayedImage = response?.result?.croppedImage ?? response?.originalImage;
+        if (displayedImage) {
+          const jpeg = await state.sdk.imageToJpeg(displayedImage);
+          const dataUrl = await state.sdk.toDataUrl(jpeg);
+          refs.croppedResult.src = dataUrl;
+        }
+
+        if (response?.originalImage) {
+          const originalJpeg = await state.sdk.imageToJpeg(response.originalImage);
+          const originalDataUrl = await state.sdk.toDataUrl(originalJpeg);
+          refs.originalResult.src = originalDataUrl;
+        }
+
+        window.setTimeout(() => {
+          if (state.scannerHandle) {
+            setCameraBadge("Aktivno");
+          }
+        }, 1200);
+      },
+      onError: (error) => {
+        console.error("Camera scanner error", error);
+        setActivity("Greska pri radu kamere");
+      },
+    });
+  } catch (error) {
+    console.error("Failed to start camera scanner", error);
+    setActivity("Neuspesno pokretanje kamere");
+    setDetection("Greska");
+    refs.startCameraBtn.disabled = false;
+    refs.stopCameraBtn.disabled = true;
+    setCameraBadge("Greska");
+  }
 }
 
-function normalizeCorners(corners) {
-	return corners.map(([x, y]) => [Number(x), Number(y)]);
+function setUploadPreview(dataUrl) {
+  refs.uploadPreview.src = dataUrl;
+  refs.uploadPreview.style.display = "block";
+  refs.uploadPlaceholder.style.display = "none";
 }
 
-function clipCorners(corners, width, height) {
-	return corners.map(([x, y]) => [
-		Math.max(0, Math.min(width - 1, x)),
-		Math.max(0, Math.min(height - 1, y)),
-	]);
+function clearUploadOverlay() {
+  state.lastUploadPolygon = [];
+  setupOverlayCanvas();
 }
 
-function polygonArea(corners) {
-	if (!Array.isArray(corners) || corners.length !== 4) {
-		return 0;
-	}
+async function runAutoCrop(image, polygon) {
+  const cropper = await state.sdk.openCroppingView({
+    containerId: "autoCropContainer",
+    image,
+    polygon,
+    disableScroll: true,
+    rotations: 0,
+    style: {
+      padding: 0,
+      polygon: {
+        color: "#73ffd7",
+        width: 2,
+        handles: {
+          size: 10,
+          color: "white",
+          border: "1px solid #d5d5d5",
+        },
+      },
+      magneticLines: {
+        color: "#ff6c45",
+      },
+    },
+  });
 
-	let area = 0;
-	for (let i = 0; i < 4; i += 1) {
-		const j = (i + 1) % 4;
-		area += (corners[i][0] * corners[j][1]) - (corners[j][0] * corners[i][1]);
-	}
-	return Math.abs(area) * 0.5;
+  try {
+    await cropper.detect();
+    const result = await cropper.apply();
+    return result?.image ?? null;
+  } finally {
+    cropper.dispose();
+  }
 }
 
-function isValidDocumentDetection(corners, imgW, imgH) {
-	if (!Array.isArray(corners) || corners.length !== 4 || !imgW || !imgH) {
-		return false;
-	}
+async function handleFileUpload(file) {
+  try {
+    await initSdk();
 
-	const area = polygonArea(corners);
-	const totalArea = imgW * imgH;
-	if (area < totalArea * 0.07 || area > totalArea * 0.98) {
-		return false;
-	}
+    refs.fileLabel.textContent = `Fajl: ${file.name}`;
+    setUploadBadge("Analiziram sliku");
+    setActivity("Pokrenuta detekcija na upload slici");
 
-	const xs = corners.map((point) => point[0]);
-	const ys = corners.map((point) => point[1]);
-	const bboxW = Math.max(...xs) - Math.min(...xs);
-	const bboxH = Math.max(...ys) - Math.min(...ys);
-	const aspectRatio = bboxW / Math.max(1, bboxH);
+    const buffer = new Uint8Array(await file.arrayBuffer());
+    const image = ScanbotSDK.Config.Image.fromEncodedBinaryData(buffer);
 
-	if (aspectRatio > 0.72 && aspectRatio < 1.42 && area < totalArea * 0.22) {
-		return false;
-	}
+    const originalJpeg = await state.sdk.imageToJpeg(image);
+    const originalDataUrl = await state.sdk.toDataUrl(originalJpeg);
+    refs.originalResult.src = originalDataUrl;
+    setUploadPreview(originalDataUrl);
 
-	const sideLengths = corners.map((point, index) => {
-		const next = corners[(index + 1) % 4];
-		return Math.hypot(next[0] - point[0], next[1] - point[1]);
-	});
-	const minSide = Math.min(...sideLengths);
-	const maxSide = Math.max(...sideLengths);
-	if (minSide < Math.hypot(imgW, imgH) * 0.08 || maxSide / Math.max(minSide, 1) > 12) {
-		return false;
-	}
+    const detection = await state.sdk.detectDocument(image);
+    const status = detection?.status || "NOT_ACQUIRED";
+    const polygon = Array.isArray(detection?.pointsNormalized) ? detection.pointsNormalized : [];
 
-	return true;
+    setDetection(status);
+    state.lastUploadPolygon = polygon;
+    drawUploadOverlay();
+
+    if (status !== "OK" || polygon.length < 4) {
+      setUploadBadge("Nije nadjen dokument");
+      refs.croppedResult.removeAttribute("src");
+      setActivity("Detekcija zavrsena bez validnog dokumenta");
+      return;
+    }
+
+    setUploadBadge("Ivice detektovane");
+    const croppedImage = await runAutoCrop(image, polygon);
+
+    if (!croppedImage) {
+      refs.croppedResult.removeAttribute("src");
+      setActivity("Auto-crop nije uspeo");
+      return;
+    }
+
+    const croppedJpeg = await state.sdk.imageToJpeg(croppedImage);
+    const croppedDataUrl = await state.sdk.toDataUrl(croppedJpeg);
+    refs.croppedResult.src = croppedDataUrl;
+
+    setActivity("Upload detekcija i auto-crop zavrseni");
+    setUploadBadge("Auto-crop zavrsen");
+  } catch (error) {
+    console.error("Upload processing failed", error);
+    clearUploadOverlay();
+    setUploadBadge("Greska");
+    setActivity("Greska u upload analizi");
+    setDetection("Greska");
+  }
 }
 
-function expandCornersOutward(corners, amountPx, frameW, frameH) {
-	if (!Array.isArray(corners) || corners.length !== 4) {
-		return corners;
-	}
+function wireEvents() {
+  refs.startCameraBtn.addEventListener("click", () => {
+    void startCameraScanner();
+  });
 
-	const centerX = corners.reduce((acc, [x]) => acc + x, 0) / 4;
-	const centerY = corners.reduce((acc, [, y]) => acc + y, 0) / 4;
+  refs.stopCameraBtn.addEventListener("click", () => {
+    void stopCameraScanner();
+  });
 
-	const expanded = corners.map(([x, y]) => {
-		const dx = x - centerX;
-		const dy = y - centerY;
-		const length = Math.hypot(dx, dy) || 1;
-		return [
-			x + ((dx / length) * amountPx),
-			y + ((dy / length) * amountPx),
-		];
-	});
+  refs.fileInput.addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    const file = input?.files?.[0];
+    if (!file) {
+      return;
+    }
 
-	return clipCorners(expanded, frameW, frameH);
+    void handleFileUpload(file);
+    input.value = "";
+  });
+
+  refs.uploadPreview.addEventListener("load", () => {
+    drawUploadOverlay();
+  });
+
+  window.addEventListener("resize", () => {
+    drawUploadOverlay();
+  });
 }
 
-function quadAverageDistance(cornersA, cornersB) {
-	if (!Array.isArray(cornersA) || !Array.isArray(cornersB) || cornersA.length !== 4 || cornersB.length !== 4) {
-		return Number.POSITIVE_INFINITY;
-	}
+async function bootstrap() {
+  wireEvents();
 
-	return cornersA.reduce((total, [ax, ay], index) => {
-		const [bx, by] = cornersB[index];
-		return total + Math.hypot(ax - bx, ay - by);
-	}, 0) / 4;
+  try {
+    await initSdk();
+    setActivity("Spreman za kameru ili upload");
+  } catch (error) {
+    console.error("SDK bootstrap failed", error);
+    setSdkState("SDK inicijalizacija nije uspela");
+    setActivity("Aplikacija nije spremna");
+    setDetection("Greska");
+  }
 }
 
-function pickBetterDetection(baseResult, nextResult) {
-	if (!baseResult) {
-		return nextResult;
-	}
-	if (!nextResult) {
-		return baseResult;
-	}
-
-	if (nextResult.found && !baseResult.found) {
-		return nextResult;
-	}
-	if (baseResult.found && !nextResult.found) {
-		return baseResult;
-	}
-
-	const baseConfidence = Number(baseResult.confidence || 0);
-	const nextConfidence = Number(nextResult.confidence || 0);
-	if (nextConfidence > baseConfidence + 0.03) {
-		return nextResult;
-	}
-
-	const baseArea = Number(baseResult.area_ratio || 0);
-	const nextArea = Number(nextResult.area_ratio || 0);
-	if (Math.abs(nextConfidence - baseConfidence) <= 0.03 && nextArea > baseArea + 0.03) {
-		return nextResult;
-	}
-
-	return baseResult;
-}
-
-function smoothCameraCorners(nextCorners, frameWidth, frameHeight) {
-	if (!Array.isArray(nextCorners) || nextCorners.length !== 4) {
-		return null;
-	}
-
-	if (!Array.isArray(state.smoothedCameraCorners) || state.smoothedCameraCorners.length !== 4) {
-		state.smoothedCameraCorners = normalizeCorners(nextCorners);
-		return state.smoothedCameraCorners;
-	}
-
-	const maxJump = Math.max(frameWidth, frameHeight) * 0.22;
-	const jump = nextCorners.reduce((total, [x, y], index) => {
-		const [prevX, prevY] = state.smoothedCameraCorners[index];
-		return total + Math.hypot(x - prevX, y - prevY);
-	}, 0) / nextCorners.length;
-
-	if (jump > maxJump) {
-		state.smoothedCameraCorners = normalizeCorners(nextCorners);
-		return state.smoothedCameraCorners;
-	}
-
-	const alpha = 0.36;
-	state.smoothedCameraCorners = state.smoothedCameraCorners.map(([prevX, prevY], index) => {
-		const [nextX, nextY] = nextCorners[index];
-		return [
-			prevX + ((nextX - prevX) * alpha),
-			prevY + ((nextY - prevY) * alpha),
-		];
-	});
-
-	return state.smoothedCameraCorners;
-}
-
-function updateDetectionUI(result, mode) {
-	if (result?.found) {
-		if (mode === "camera") {
-			if (result.confidence >= 0.76) {
-				setDetectionState("Dokument je stabilno detektovan");
-			} else if (result.confidence >= 0.58) {
-				setDetectionState("Dokument je pronadjen, zadrzi kadar mirno");
-			} else {
-				setDetectionState("Dokument je detektovan, poboljsavam stabilnost");
-			}
-		} else {
-			setDetectionState("Dokument je pronadjen na slici");
-		}
-		setConfidence(`${Math.round(result.confidence * 100)}%`);
-	} else {
-		setDetectionState(mode === "camera" ? "Trazi dokument u live kadru" : "Dokument nije dovoljno jasno izdvojen");
-		setConfidence("-");
-	}
-
-	setInsightValues({
-		mode,
-		frameWidth: result?.frame_width,
-		frameHeight: result?.frame_height,
-		corners: result?.corners,
-		areaRatio: result?.area_ratio,
-	});
-}
-
-function getSourceDimensions(source) {
-	if (source instanceof HTMLVideoElement) {
-		return { width: source.videoWidth, height: source.videoHeight };
-	}
-	return { width: source.naturalWidth, height: source.naturalHeight };
-}
-
-function sampleToAnalysisCanvas(source, mode, forcedMaxDimension = null) {
-	const { width: sourceWidth, height: sourceHeight } = getSourceDimensions(source);
-	const maxDimension = forcedMaxDimension ?? (mode === "camera" ? 620 : 1200);
-	const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
-	const frameWidth = Math.max(1, Math.round(sourceWidth * scale));
-	const frameHeight = Math.max(1, Math.round(sourceHeight * scale));
-
-	refs.analysisCanvas.width = frameWidth;
-	refs.analysisCanvas.height = frameHeight;
-	const context = refs.analysisCanvas.getContext("2d", { willReadFrequently: true });
-	context.drawImage(source, 0, 0, frameWidth, frameHeight);
-	return context.getImageData(0, 0, frameWidth, frameHeight);
-}
-
-function sampleCanvasToImageData(sourceCanvas, maxDimension = 1280) {
-	const scale = Math.min(1, maxDimension / Math.max(sourceCanvas.width, sourceCanvas.height));
-	const width = Math.max(1, Math.round(sourceCanvas.width * scale));
-	const height = Math.max(1, Math.round(sourceCanvas.height * scale));
-
-	refs.analysisCanvas.width = width;
-	refs.analysisCanvas.height = height;
-	const context = refs.analysisCanvas.getContext("2d", { willReadFrequently: true });
-	context.drawImage(sourceCanvas, 0, 0, width, height);
-	return context.getImageData(0, 0, width, height);
-}
-
-function setupDetectorWorker() {
-	if (state.worker) {
-		return;
-	}
-
-	setEngineState("Pokrecem Python worker...");
-	const worker = new Worker(WORKER_URL);
-	state.worker = worker;
-
-	worker.onmessage = (event) => {
-		const message = event.data;
-		if (!message || typeof message !== "object") {
-			return;
-		}
-
-		if (message.type === "status") {
-			setEngineState(String(message.message || "Python worker radi..."));
-			return;
-		}
-
-		if (message.type === "ready") {
-			state.workerReady = true;
-			setEngineState("Python worker je spreman");
-			if (state.pendingUploadDetection) {
-				void processUploadImage();
-			}
-			if (state.cameraStream) {
-				startCameraLoop();
-			}
-			return;
-		}
-
-		if (message.type === "result") {
-			const pending = state.pendingDetections.get(message.id);
-			if (!pending) {
-				return;
-			}
-			clearTimeout(pending.timeoutId);
-			state.pendingDetections.delete(message.id);
-			pending.resolve(message.result || null);
-			return;
-		}
-
-		if (message.type === "error") {
-			const pending = state.pendingDetections.get(message.id);
-			if (!pending) {
-				setDetectionState("Greska u Python detektoru");
-				return;
-			}
-			clearTimeout(pending.timeoutId);
-			state.pendingDetections.delete(message.id);
-			pending.reject(new Error(message.error || "Unknown worker error"));
-		}
-	};
-
-	worker.onerror = (error) => {
-		console.error(error);
-		setEngineState("Python worker nije uspesno pokrenut");
-		setDetectionState("Proveri internet konekciju i osvezi stranicu");
-	};
-}
-
-function getWorkerHints(mode, imageData) {
-	if (mode !== "camera") {
-		return null;
-	}
-
-	const previous = state.lastCameraResult;
-	if (!previous?.found || !Array.isArray(previous.corners) || previous.corners.length !== 4) {
-		return null;
-	}
-
-	const prevFrameW = Number(previous.frame_width || 0);
-	const prevFrameH = Number(previous.frame_height || 0);
-	if (!prevFrameW || !prevFrameH) {
-		return null;
-	}
-
-	const scaleX = imageData.width / prevFrameW;
-	const scaleY = imageData.height / prevFrameH;
-	const prevCorners = previous.corners.map(([x, y]) => [x * scaleX, y * scaleY]);
-
-	return {
-		prev_corners: prevCorners,
-	};
-}
-
-function requestWorkerDetection(imageData, mode, hints = null) {
-	if (!state.workerReady || !state.worker) {
-		return Promise.resolve(null);
-	}
-
-	const id = state.workerRequestSeq;
-	state.workerRequestSeq += 1;
-
-	return new Promise((resolve, reject) => {
-		const timeoutId = setTimeout(() => {
-			state.pendingDetections.delete(id);
-			reject(new Error("Python detection timeout"));
-		}, 10000);
-
-		state.pendingDetections.set(id, { resolve, reject, timeoutId });
-
-		const pixels = imageData.data.buffer;
-		state.worker.postMessage({
-			type: "detect",
-			id,
-			mode,
-			hints,
-			width: imageData.width,
-			height: imageData.height,
-			pixels,
-		}, [pixels]);
-	});
-}
-
-async function detectDocument(imageData, mode, hints = null) {
-	const result = await requestWorkerDetection(imageData, mode, hints);
-	if (!result) {
-		return null;
-	}
-
-	if (!result.found || !Array.isArray(result.corners) || result.corners.length !== 4) {
-		result.corners = [];
-		return result;
-	}
-
-	result.corners = normalizeCorners(result.corners);
-	if (!isValidDocumentDetection(result.corners, result.frame_width, result.frame_height)) {
-		result.found = false;
-		result.corners = [];
-		result.confidence = Math.min(Number(result.confidence || 0), 0.22);
-		return result;
-	}
-
-	const expandPx = Math.max(6, Math.round(Math.min(result.frame_width, result.frame_height) * 0.008));
-	result.corners = expandCornersOutward(result.corners, expandPx, result.frame_width, result.frame_height);
-	return result;
-}
-
-async function processUploadImage() {
-	if (!state.uploadImageLoaded) {
-		return;
-	}
-
-	if (!state.workerReady) {
-		state.pendingUploadDetection = true;
-		setDetectionState("Python worker se i dalje ucitava");
-		return;
-	}
-
-	if (state.detectionInFlight) {
-		return;
-	}
-
-	state.detectionInFlight = true;
-	setDetectionState("Analiziram uploadovanu sliku...");
-
-	try {
-		const firstPass = sampleToAnalysisCanvas(refs.uploadPreview, "upload", 1180);
-		let result = await detectDocument(firstPass, "upload");
-
-		const shouldRefine = !result?.found || Number(result.confidence || 0) < 0.68;
-		if (shouldRefine) {
-			setDetectionState("Radim dodatni precizni prolaz...");
-			const secondPass = sampleToAnalysisCanvas(refs.uploadPreview, "upload", 1620);
-			const refined = await detectDocument(secondPass, "upload");
-			result = pickBetterDetection(result, refined);
-		}
-
-		state.lastUploadResult = result;
-		updateDetectionUI(result, "upload");
-		redrawUploadOverlay();
-	} catch (error) {
-		console.error(error);
-		setDetectionState("Doslo je do greske pri obradi slike");
-		setConfidence("-");
-	} finally {
-		state.pendingUploadDetection = false;
-		state.detectionInFlight = false;
-	}
-}
-
-function handleUploadSelection(file) {
-	if (!file) {
-		return;
-	}
-
-	if (state.uploadObjectUrl) {
-		URL.revokeObjectURL(state.uploadObjectUrl);
-	}
-
-	state.uploadImageLoaded = false;
-	state.lastUploadResult = null;
-	const objectUrl = URL.createObjectURL(file);
-	state.uploadObjectUrl = objectUrl;
-	refs.fileMeta.textContent = `${file.name} • ${(file.size / 1024 / 1024).toFixed(2)} MB`;
-	refs.uploadPlaceholder.style.display = "none";
-	refs.uploadPreview.classList.add("is-visible");
-	refs.uploadPreview.onload = () => {
-		state.uploadImageLoaded = true;
-		void processUploadImage();
-	};
-	refs.uploadPreview.src = objectUrl;
-}
-
-function resetCameraTracking() {
-	state.smoothedCameraCorners = null;
-	state.lastCameraResult = null;
-	state.lastCameraDetectionAt = 0;
-	state.lastDetectionDurationMs = 0;
-	state.cameraDetectionInterval = 95;
-	state.missingContourFrames = 0;
-}
-
-function setCaptureButtonBusy(isBusy) {
-	if (refs.fsCaptureBtn) {
-		refs.fsCaptureBtn.disabled = isBusy;
-	}
-}
-
-async function openFullscreenScanner() {
-	if (state.fullscreenOpen) {
-		return;
-	}
-
-	state.fullscreenOpen = true;
-	refs.fullscreenScanner.classList.remove("is-hidden");
-	refs.fullscreenScanner.setAttribute("aria-hidden", "false");
-	document.body.style.overflow = "hidden";
-	setDetectionState("Pokrecem full-screen kameru...");
-	setCaptureButtonBusy(false);
-
-	if (refs.fullscreenScanner.requestFullscreen && !document.fullscreenElement) {
-		try {
-			await refs.fullscreenScanner.requestFullscreen();
-		} catch {
-			// Fullscreen API may be blocked by browser policy.
-		}
-	}
-
-	await startCamera();
-}
-
-async function closeFullscreenScanner({ skipExitFullscreen = false } = {}) {
-	if (!state.fullscreenOpen) {
-		return;
-	}
-
-	state.closingFullscreen = true;
-	stopCamera();
-	state.fullscreenOpen = false;
-	refs.fullscreenScanner.classList.add("is-hidden");
-	refs.fullscreenScanner.setAttribute("aria-hidden", "true");
-	document.body.style.overflow = "";
-
-	if (!skipExitFullscreen && document.fullscreenElement && document.exitFullscreen) {
-		try {
-			await document.exitFullscreen();
-		} catch {
-			// Ignore exit fullscreen failures.
-		}
-	}
-
-	state.closingFullscreen = false;
-	setDetectionState("Klikni na dugme za full-screen kameru");
-	setConfidence("-");
-}
-
-async function startCamera() {
-	if (!navigator.mediaDevices?.getUserMedia) {
-		refs.cameraHint.textContent = "Ovaj browser ne podrzava pristup kameri.";
-		setDetectionState("Ovaj browser ne podrzava kameru");
-		return;
-	}
-
-	try {
-		const stream = await navigator.mediaDevices.getUserMedia({
-			audio: false,
-			video: {
-				facingMode: { ideal: "environment" },
-				width: { ideal: 1920 },
-				height: { ideal: 1080 },
-			},
-		});
-
-		state.cameraStream = stream;
-		resetCameraTracking();
-		const surface = getActiveCameraSurface();
-		surface.preview.srcObject = stream;
-		surface.preview.classList.remove("is-hidden");
-		refs.cameraPlaceholder.style.display = "none";
-		refs.cameraHint.textContent = "Kamera je aktivna preko celog ekrana.";
-
-		await surface.preview.play();
-		if (state.workerReady) {
-			setDetectionState("Trazi dokument u live kadru");
-			startCameraLoop();
-		} else {
-			setDetectionState("Kamera radi, Python worker se jos ucitava");
-		}
-	} catch (error) {
-		console.error(error);
-		refs.cameraHint.textContent = "Pristup kameri nije dozvoljen ili nije dostupan na ovoj adresi.";
-		setDetectionState("Pristup kameri nije dozvoljen");
-	}
-}
-
-function stopCamera() {
-	if (state.cameraLoopId) {
-		cancelAnimationFrame(state.cameraLoopId);
-		state.cameraLoopId = null;
-	}
-
-	if (state.cameraStream) {
-		state.cameraStream.getTracks().forEach((track) => track.stop());
-		state.cameraStream = null;
-	}
-
-	resetCameraTracking();
-	refs.cameraPreview.pause();
-	refs.cameraPreview.srcObject = null;
-	refs.cameraPreview.classList.add("is-hidden");
-	refs.fsCameraPreview.pause();
-	refs.fsCameraPreview.srcObject = null;
-	refs.fsCameraPreview.classList.add("is-hidden");
-	refs.cameraPlaceholder.style.display = "grid";
-	refs.cameraHint.textContent = "Kamera radi na localhost ili https adresi. Najbolji rezultat je kada je list ceo u kadru i bez jakih senki.";
-	redrawCameraOverlay();
-}
-
-function bilinearSample(data, width, height, x, y, channel) {
-	const x0 = Math.max(0, Math.min(width - 1, Math.floor(x)));
-	const y0 = Math.max(0, Math.min(height - 1, Math.floor(y)));
-	const x1 = Math.max(0, Math.min(width - 1, x0 + 1));
-	const y1 = Math.max(0, Math.min(height - 1, y0 + 1));
-	const fx = x - x0;
-	const fy = y - y0;
-
-	const idx00 = ((y0 * width) + x0) * 4 + channel;
-	const idx10 = ((y0 * width) + x1) * 4 + channel;
-	const idx01 = ((y1 * width) + x0) * 4 + channel;
-	const idx11 = ((y1 * width) + x1) * 4 + channel;
-
-	const v00 = data[idx00];
-	const v10 = data[idx10];
-	const v01 = data[idx01];
-	const v11 = data[idx11];
-
-	const top = v00 + ((v10 - v00) * fx);
-	const bottom = v01 + ((v11 - v01) * fx);
-	return top + ((bottom - top) * fy);
-}
-
-function cropPerspectiveFromCorners(srcCanvas, corners) {
-	const [tl, tr, br, bl] = normalizeCorners(corners);
-	const topWidth = Math.hypot(tr[0] - tl[0], tr[1] - tl[1]);
-	const bottomWidth = Math.hypot(br[0] - bl[0], br[1] - bl[1]);
-	const leftHeight = Math.hypot(bl[0] - tl[0], bl[1] - tl[1]);
-	const rightHeight = Math.hypot(br[0] - tr[0], br[1] - tr[1]);
-
-	const dstWidth = Math.max(1, Math.round(Math.max(topWidth, bottomWidth)));
-	const dstHeight = Math.max(1, Math.round(Math.max(leftHeight, rightHeight)));
-
-	const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true });
-	const srcImageData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
-	const src = srcImageData.data;
-
-	const outCanvas = document.createElement("canvas");
-	outCanvas.width = dstWidth;
-	outCanvas.height = dstHeight;
-	const outCtx = outCanvas.getContext("2d");
-	const outImageData = outCtx.createImageData(dstWidth, dstHeight);
-	const out = outImageData.data;
-
-	for (let y = 0; y < dstHeight; y += 1) {
-		const v = dstHeight <= 1 ? 0 : y / (dstHeight - 1);
-		for (let x = 0; x < dstWidth; x += 1) {
-			const u = dstWidth <= 1 ? 0 : x / (dstWidth - 1);
-			const sx =
-				((1 - u) * (1 - v) * tl[0])
-				+ (u * (1 - v) * tr[0])
-				+ (u * v * br[0])
-				+ ((1 - u) * v * bl[0]);
-			const sy =
-				((1 - u) * (1 - v) * tl[1])
-				+ (u * (1 - v) * tr[1])
-				+ (u * v * br[1])
-				+ ((1 - u) * v * bl[1]);
-
-			const idx = ((y * dstWidth) + x) * 4;
-			out[idx] = bilinearSample(src, srcCanvas.width, srcCanvas.height, sx, sy, 0);
-			out[idx + 1] = bilinearSample(src, srcCanvas.width, srcCanvas.height, sx, sy, 1);
-			out[idx + 2] = bilinearSample(src, srcCanvas.width, srcCanvas.height, sx, sy, 2);
-			out[idx + 3] = 255;
-		}
-	}
-
-	outCtx.putImageData(outImageData, 0, 0);
-	return outCanvas;
-}
-
-function applyCapturedDataUrl(dataUrl, metadataLabel) {
-	if (state.uploadObjectUrl) {
-		URL.revokeObjectURL(state.uploadObjectUrl);
-		state.uploadObjectUrl = null;
-	}
-
-	state.uploadImageLoaded = false;
-	state.lastUploadResult = null;
-	refs.fileMeta.textContent = metadataLabel;
-	refs.uploadPlaceholder.style.display = "none";
-	refs.uploadPreview.classList.add("is-visible");
-	refs.uploadPreview.onload = () => {
-		state.uploadImageLoaded = true;
-		void processUploadImage();
-	};
-	refs.uploadPreview.src = dataUrl;
-}
-
-async function captureAndCropFromCamera() {
-	if (!state.cameraStream || state.captureInFlight) {
-		return;
-	}
-
-	const surface = getActiveCameraSurface();
-	const video = surface.preview;
-	if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) {
-		return;
-	}
-
-	state.captureInFlight = true;
-	setCaptureButtonBusy(true);
-	setDetectionState("Slikam i kropujem dokument...");
-
-	try {
-		const fullCanvas = document.createElement("canvas");
-		fullCanvas.width = video.videoWidth;
-		fullCanvas.height = video.videoHeight;
-		fullCanvas.getContext("2d").drawImage(video, 0, 0, fullCanvas.width, fullCanvas.height);
-
-		let outputCanvas = fullCanvas;
-		let usedCrop = false;
-
-		if (state.lastCameraResult?.found && Array.isArray(state.lastCameraResult.corners) && state.lastCameraResult.corners.length === 4) {
-			const scaleX = fullCanvas.width / state.lastCameraResult.frame_width;
-			const scaleY = fullCanvas.height / state.lastCameraResult.frame_height;
-			const cornersInVideo = state.lastCameraResult.corners.map(([x, y]) => [x * scaleX, y * scaleY]);
-
-			if (isValidDocumentDetection(cornersInVideo, fullCanvas.width, fullCanvas.height)) {
-				outputCanvas = cropPerspectiveFromCorners(fullCanvas, cornersInVideo);
-				usedCrop = true;
-			}
-		}
-
-		if (!usedCrop && state.workerReady) {
-			const stillImageData = sampleCanvasToImageData(fullCanvas, 1400);
-			const stillResult = await detectDocument(stillImageData, "upload");
-			if (stillResult?.found && Array.isArray(stillResult.corners) && stillResult.corners.length === 4) {
-				const sx = fullCanvas.width / stillResult.frame_width;
-				const sy = fullCanvas.height / stillResult.frame_height;
-				const stillCorners = stillResult.corners.map(([x, y]) => [x * sx, y * sy]);
-				if (isValidDocumentDetection(stillCorners, fullCanvas.width, fullCanvas.height)) {
-					outputCanvas = cropPerspectiveFromCorners(fullCanvas, stillCorners);
-					usedCrop = true;
-				}
-			}
-		}
-
-		const dataUrl = outputCanvas.toDataURL("image/jpeg", 0.94);
-		await closeFullscreenScanner();
-		setMode("upload");
-		applyCapturedDataUrl(
-			dataUrl,
-			usedCrop
-				? `Snimak sa kamere • automatski kropovan • ${outputCanvas.width}x${outputCanvas.height}`
-				: `Snimak sa kamere • bez kropljenja • ${outputCanvas.width}x${outputCanvas.height}`,
-		);
-	} catch (error) {
-		console.error(error);
-		setDetectionState("Greska tokom slikanja i kropljenja");
-	} finally {
-		state.captureInFlight = false;
-		setCaptureButtonBusy(false);
-	}
-}
-
-async function performCameraDetection() {
-	if (!state.fullscreenOpen || !state.cameraStream || !state.workerReady || state.detectionInFlight) {
-		return;
-	}
-
-	const surface = getActiveCameraSurface();
-	if (surface.preview.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-		return;
-	}
-
-	state.detectionInFlight = true;
-	const startedAt = performance.now();
-
-	try {
-		const imageData = sampleToAnalysisCanvas(surface.preview, "camera", 430);
-		const workerHints = getWorkerHints("camera", imageData);
-		const result = await detectDocument(imageData, "camera", workerHints);
-
-		if (result?.found) {
-			const smoothedCorners = smoothCameraCorners(result.corners, result.frame_width, result.frame_height);
-			const previousCorners = state.lastCameraResult?.corners;
-			if (Array.isArray(previousCorners) && previousCorners.length === 4) {
-				const drift = quadAverageDistance(smoothedCorners, previousCorners);
-				const maxDrift = Math.max(result.frame_width, result.frame_height) * 0.24;
-				const previousConfidence = Number(state.lastCameraResult?.confidence || 0);
-				if (drift > maxDrift && Number(result.confidence || 0) < previousConfidence + 0.06) {
-					state.missingContourFrames += 1;
-					redrawCameraOverlay({ hold: true });
-					setDetectionState("Stabilizujem konturu dokumenta...");
-					setConfidence(`${Math.round(previousConfidence * 100)}%`);
-					return;
-				}
-			}
-
-			result.corners = smoothedCorners;
-			state.lastCameraResult = result;
-			state.missingContourFrames = 0;
-			updateDetectionUI(result, "camera");
-			redrawCameraOverlay();
-			return;
-		}
-
-		state.missingContourFrames += 1;
-		if (state.lastCameraResult?.corners?.length && state.missingContourFrames <= state.maxMissingContourFrames) {
-			redrawCameraOverlay({ hold: true });
-			setDetectionState("Dokument kratko izlazi iz kadra");
-			setConfidence(`${Math.round((state.lastCameraResult.confidence || 0) * 100)}%`);
-			return;
-		}
-
-		state.smoothedCameraCorners = null;
-		state.lastCameraResult = result;
-		updateDetectionUI(result, "camera");
-		redrawCameraOverlay();
-	} catch (error) {
-		console.error(error);
-		setDetectionState("Greska tokom live detekcije");
-		setConfidence("-");
-	} finally {
-		state.lastDetectionDurationMs = performance.now() - startedAt;
-		state.cameraDetectionInterval = Math.min(170, Math.max(65, state.lastDetectionDurationMs * 0.95));
-		state.detectionInFlight = false;
-	}
-}
-
-function startCameraLoop() {
-	if (state.cameraLoopId) {
-		cancelAnimationFrame(state.cameraLoopId);
-	}
-
-	const loop = (timestamp) => {
-		state.cameraLoopId = requestAnimationFrame(loop);
-		if (!state.cameraStream || !state.fullscreenOpen) {
-			return;
-		}
-
-		if (timestamp - state.lastCameraDetectionAt < state.cameraDetectionInterval) {
-			return;
-		}
-
-		state.lastCameraDetectionAt = timestamp;
-		void performCameraDetection();
-	};
-
-	state.cameraLoopId = requestAnimationFrame(loop);
-}
-
-function bindEvents() {
-	refs.modeButtons.forEach((button) => {
-		button.addEventListener("click", () => setMode(button.dataset.mode));
-	});
-
-	refs.fileInput.addEventListener("change", (event) => {
-		const [file] = event.target.files || [];
-		handleUploadSelection(file);
-	});
-
-	refs.cameraToggle.addEventListener("click", async () => {
-		if (state.activeMode !== "camera") {
-			setMode("camera");
-		}
-		await openFullscreenScanner();
-	});
-
-	refs.fsCloseBtn.addEventListener("click", async () => {
-		await closeFullscreenScanner();
-	});
-
-	refs.fsCaptureBtn.addEventListener("click", async () => {
-		await captureAndCropFromCamera();
-	});
-
-	document.addEventListener("fullscreenchange", () => {
-		if (!state.fullscreenOpen || state.closingFullscreen) {
-			return;
-		}
-
-		if (!document.fullscreenElement) {
-			void closeFullscreenScanner({ skipExitFullscreen: true });
-		}
-	});
-
-	window.addEventListener("resize", () => {
-		redrawUploadOverlay();
-		redrawCameraOverlay();
-	});
-
-	window.addEventListener("beforeunload", () => {
-		if (state.uploadObjectUrl) {
-			URL.revokeObjectURL(state.uploadObjectUrl);
-		}
-		stopCamera();
-		if (state.worker) {
-			state.worker.terminate();
-			state.worker = null;
-		}
-	});
-}
-
-function init() {
-	bindEvents();
-	setMode("upload");
-	setupDetectorWorker();
-}
-
-init();
+void bootstrap();

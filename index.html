@@ -3,164 +3,99 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Realtime Document Edge Scanner</title>
+	<title>Scanbot Web Document Scanner</title>
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-	<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+	<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 	<link rel="stylesheet" href="./style.css">
 </head>
 <body>
-	<div class="page-shell">
-		<div class="ambient ambient-left"></div>
-		<div class="ambient ambient-right"></div>
+	<div class="bg-shape bg-shape-one"></div>
+	<div class="bg-shape bg-shape-two"></div>
 
-		<main class="app-shell">
-			<section class="hero panel">
-				<div class="hero-copy">
-					<span class="eyebrow">Pyodide + scikit-image</span>
-					<h1>Detekcija ivica dokumenta u browseru</h1>
-					<p>
-						Uploaduj sliku ili ukljuci kameru. Aplikacija analizira kadar u Pythonu,
-						pronalazi dokument i iscrtava njegove ivice preko pregleda u realnom vremenu.
-					</p>
+	<main class="layout">
+		<header class="hero panel">
+			<div>
+				<p class="label">Scanbot SDK / Vanilla JS</p>
+				<h1>Skener dokumenata od nule</h1>
+				<p class="lead">
+					Kamera i upload rade iskljucivo preko Scanbot Web SDK-a: detekcija ivica,
+					auto-capture i auto-crop.
+				</p>
+			</div>
+			<div class="status-grid">
+				<div class="status-tile">
+					<span>SDK status</span>
+					<strong id="sdkState">Inicijalizacija...</strong>
 				</div>
-
-				<div class="hero-metrics">
-					<article class="metric-card">
-						<span>Python engine</span>
-						<strong id="engineState">Ucitavanje Python worker okruzenja...</strong>
-					</article>
-					<article class="metric-card">
-						<span>Status detekcije</span>
-						<strong id="detectionState">Ceka prvi kadar</strong>
-					</article>
-					<article class="metric-card accent">
-						<span>Pouzdanost</span>
-						<strong id="confidenceState">-</strong>
-					</article>
+				<div class="status-tile">
+					<span>Aktivnost</span>
+					<strong id="activityState">Ceka akciju</strong>
 				</div>
-			</section>
-
-			<section class="workspace-grid">
-				<aside class="control-panel panel">
-					<div class="panel-header">
-						<h2>Izvor slike</h2>
-						<p>Prebaci izmedju staticke slike i live kamere.</p>
-					</div>
-
-					<div class="mode-switch" role="tablist" aria-label="Izbor izvora">
-						<button class="mode-button is-active" type="button" data-mode="upload">Slika</button>
-						<button class="mode-button" type="button" data-mode="camera">Kamera</button>
-					</div>
-
-					<div class="mode-pane" id="uploadPane">
-						<label class="upload-button" for="fileInput">
-							<span>Otpremi dokument</span>
-							<small>JPG, PNG, WEBP, fotografije sa telefona</small>
-						</label>
-						<input id="fileInput" type="file" accept="image/*">
-						<p class="helper-text" id="fileMeta">Jos nije izabrana nijedna slika.</p>
-					</div>
-
-					<div class="mode-pane is-hidden" id="cameraPane">
-						<button id="cameraToggle" class="camera-button" type="button">Otvori full-screen kameru</button>
-						<p class="helper-text" id="cameraHint">
-							Kamera se otvara preko celog ekrana i u realnom vremenu detektuje papir. Kada slikas, dokument se odmah kropuje.
-						</p>
-					</div>
-
-					<div class="tips-card">
-						<h3>Za stabilniju detekciju</h3>
-						<ul>
-							<li>Drzi telefon ravno iznad dokumenta.</li>
-							<li>Obezbedi kontrast izmedju papira i pozadine.</li>
-							<li>Izbegni prejak odsjaj i iseckene uglove.</li>
-						</ul>
-					</div>
-				</aside>
-
-				<section class="viewer-panel panel">
-					<div class="viewer-header">
-						<div>
-							<h2>Pregled sa overlay-em</h2>
-							<p>Detektovane ivice su prikazane preko originalnog prikaza.</p>
-						</div>
-						<span class="live-badge" id="liveBadge">Upload rezim</span>
-					</div>
-
-					<div class="stage is-active" id="uploadStage">
-						<div class="media-frame" id="uploadFrame">
-							<div class="placeholder" id="uploadPlaceholder">
-								<strong>Otpremi fotografiju dokumenta</strong>
-								<span>Posle analize videces cetvorougao preko papira ili racuna.</span>
-							</div>
-							<img id="uploadPreview" alt="Uploadovani dokument">
-							<canvas id="uploadOverlay" aria-hidden="true"></canvas>
-						</div>
-					</div>
-
-					<div class="stage" id="cameraStage">
-						<div class="media-frame" id="cameraFrame">
-							<div class="placeholder" id="cameraPlaceholder">
-								<strong>Ukljuci kameru</strong>
-								<span>Tokom rada se ivice dokumenta osvezavaju iz kadra u kadar.</span>
-							</div>
-							<video id="cameraPreview" class="is-hidden" autoplay playsinline muted></video>
-							<canvas id="cameraOverlay" aria-hidden="true"></canvas>
-						</div>
-					</div>
-				</section>
-
-				<aside class="insights-panel panel">
-					<div class="panel-header compact">
-						<h2>Signal</h2>
-						<p>Uvid u ono sto detektor trenutno vidi.</p>
-					</div>
-
-					<dl class="insights-list">
-						<div>
-							<dt>Aktivni rezim</dt>
-							<dd id="activeModeLabel">Slika</dd>
-						</div>
-						<div>
-							<dt>Analizirana rezolucija</dt>
-							<dd id="frameSizeLabel">-</dd>
-						</div>
-						<div>
-							<dt>Detektovane tacke</dt>
-							<dd id="cornersLabel">-</dd>
-						</div>
-						<div>
-							<dt>Povrsina dokumenta</dt>
-							<dd id="areaLabel">-</dd>
-						</div>
-					</dl>
-
-					<div class="engine-note">
-						<h3>Kako radi</h3>
-						<p>
-							JS uzima kadar, Python kroz Pyodide pokrece Canny edge detekciju,
-							morfolosko zatvaranje i aproksimaciju najveceg cetvorougla, a zatim se rezultat iscrtava preko canvasa.
-						</p>
-					</div>
-				</aside>
-			</section>
-		</main>
-
-		<canvas id="analysisCanvas" hidden></canvas>
-
-		<div class="fullscreen-scanner is-hidden" id="fullscreenScanner" aria-hidden="true">
-			<div class="fullscreen-scanner__frame" id="fsCameraFrame">
-				<video id="fsCameraPreview" autoplay playsinline muted></video>
-				<canvas id="fsCameraOverlay" aria-hidden="true"></canvas>
-				<div class="fullscreen-scanner__hud">
-					<button id="fsCloseBtn" class="fs-icon-button" type="button">Zatvori</button>
-					<p id="fsStatus" class="fs-status">Trazi dokument u kadru...</p>
-					<button id="fsCaptureBtn" class="fs-capture-button" type="button" aria-label="Slikaj dokument"></button>
+				<div class="status-tile accent">
+					<span>Detekcija</span>
+					<strong id="detectionState">-</strong>
 				</div>
 			</div>
-		</div>
-	</div>
+		</header>
+
+		<section class="workspace">
+			<aside class="panel actions">
+				<h2>Akcije</h2>
+				<p>Koristi kameru ili upload slike. Obe putanje koriste Scanbot engine.</p>
+
+				<div class="button-stack">
+					<button id="startCameraBtn" class="btn btn-primary" type="button">Pokreni kameru skener</button>
+					<button id="stopCameraBtn" class="btn btn-ghost" type="button" disabled>Zaustavi kameru</button>
+					<label class="btn btn-upload" for="fileInput">Upload slike dokumenta</label>
+					<input id="fileInput" type="file" accept="image/*">
+				</div>
+
+				<p id="fileLabel" class="meta">Nijedna slika nije izabrana.</p>
+				<p class="note">
+					Za produkciju obavezno hostuj Scanbot bundle lokalno i unesi validan license key.
+				</p>
+			</aside>
+
+			<section class="panel scanner-panel">
+				<div class="panel-head">
+					<h2>Kamera (Scanbot Classic UI)</h2>
+					<span class="chip" id="cameraBadge">Neaktivno</span>
+				</div>
+				<div id="scannerContainer" class="scanner-container">
+					<div class="scanner-placeholder">Pokreni kameru da vidis live ivice i auto-capture.</div>
+				</div>
+			</section>
+
+			<section class="panel upload-panel">
+				<div class="panel-head">
+					<h2>Upload analiza</h2>
+					<span class="chip" id="uploadBadge">Ceka sliku</span>
+				</div>
+				<div id="uploadStage" class="upload-stage">
+					<div class="upload-placeholder" id="uploadPlaceholder">Uploaduj sliku da se iscrtaju ivice i odradi auto-crop.</div>
+					<img id="uploadPreview" alt="Upload preview">
+					<canvas id="uploadOverlay" aria-hidden="true"></canvas>
+				</div>
+			</section>
+
+			<section class="panel result-panel">
+				<h2>Rezultati</h2>
+				<div class="result-grid">
+					<article>
+						<h3>Original</h3>
+						<img id="originalResult" alt="Original dokument">
+					</article>
+					<article>
+						<h3>Cropped (auto)</h3>
+						<img id="croppedResult" alt="Auto-crop rezultat">
+					</article>
+				</div>
+			</section>
+		</section>
+	</main>
+
+	<div id="autoCropContainer" class="crop-host" aria-hidden="true"></div>
 
 	<script type="module" src="./script.js"></script>
 </body>

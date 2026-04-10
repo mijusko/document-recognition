@@ -1,16 +1,39 @@
-# Document Recognition (frontend)
+# Scanbot Web Document Scanner (Vanilla JS)
 
-This repository contains a browser-only document recognition / scanner app using HTML/CSS/JS with Python (Pyodide) and an in-browser deep segmentation model (BiRefNet via Transformers.js).
+Ovaj projekat je resetovan od nule i sada koristi iskljucivo **Scanbot Web Document Scanner SDK**.
 
-Quick notes
-- Static site — no backend required. Netlify can publish the project root.
-- The app loads a DL model (~100MB) on first visit; prefer testing on a fast connection.
-- To run locally:
+## Funkcionalnosti
+
+- Kamera skener preko Scanbot Classic UI (`createDocumentScanner`)
+- Live detekcija ivica dokumenta u kameri
+- Auto-capture u camera modu
+- Upload slike dokumenta
+- Detekcija ivica na upload slici (`detectDocument`)
+- Iscrtavanje detektovanog poligona preko slike
+- Auto-crop upload slike preko Scanbot Cropping View API
+
+## Brzi start
+
+1. Pokreni staticki server iz root foldera:
 
 ```powershell
 python -m http.server 8080
-# then open http://localhost:8080 in your browser
 ```
 
-Netlify deploy
-- Connect this GitHub repo in Netlify and set publish directory to `/` (project root). No build command is required for the current static setup.
+2. Otvori:
+
+```text
+http://localhost:8080
+```
+
+## License key
+
+U [script.js](script.js) podesi:
+
+- `LICENSE_KEY`
+
+Napomena: bez license key-a SDK radi ograniceno (trial sesija).
+
+## Produkcija
+
+Za produkciju nemoj koristiti CDN import. Preporuka je da Scanbot bundle i wasm fajlove hostujes na svom domenu i postavis `enginePath` ka lokalnoj putanji.
