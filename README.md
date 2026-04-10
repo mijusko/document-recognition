@@ -1,16 +1,13 @@
-# jscanify Document Scanner - Vanilla Web App
+# Scanner.js Document Scanner - Vanilla Web App
 
-Projekat je potpuno prebacen na **jscanify + OpenCV.js**.
+Projekat je potpuno prebacen na **scanner.js (Asprise)**.
 
 ## Sta sada radi
 
-- Kamera skeniranje u browseru (`getUserMedia` + `jscanify`)
-- Live detekcija ivica dokumenta na video frame-ovima
-- Iscrtavanje ivica (polygon overlay) preko kamere
-- Auto-crop kada je detekcija stabilna kroz vise frame-ova
-- Upload slike dokumenta
-- Detekcija ivica na upload slici
-- Automatski crop i prikaz rezultata
+- Pokretanje scanner.js scan dijaloga
+- Skeniranje preko dostupnog izvora (TWAIN/WIA uredjaji ili podrzani izvori)
+- Vracanje skeniranih slika kao base64 i prikaz u rezultat panelu
+- Upload slike dokumenta za lokalni prikaz u UI
 
 ## Pokretanje
 
@@ -28,11 +25,10 @@ http://localhost:8080
 
 ## Tehnologija
 
-- OpenCV.js preko CDN skripte:
-- `https://docs.opencv.org/4.7.0/opencv.js`
-- jscanify preko CDN skripte:
-- `https://cdn.jsdelivr.net/gh/ColonelParrot/jscanify@master/src/jscanify.min.js`
+- scanner.js preko CDN skripte:
+- `https://asprise.azureedge.net/scannerjs/scanner.js`
 
 ## Napomena za produkciju
 
-Za produkciju izbegni CDN i hostuj OpenCV i jscanify bundle lokalno na svom domenu.
+scanner.js za punu funkcionalnost zahteva Asprise Scan App instalaciju na masini korisnika.
+Za produkciju je preporuceno hostovanje scanner.js fajlova sa sopstvenog domena.

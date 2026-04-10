@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>jscanify Document Scanner</title>
+	<title>Scanner.js Document Scanner</title>
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 	<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -16,11 +16,11 @@
 	<main class="layout">
 		<header class="hero panel">
 			<div>
-				<p class="label">jscanify / OpenCV.js</p>
+				<p class="label">scanner.js / Asprise</p>
 				<h1>Skener dokumenata od nule</h1>
 				<p class="lead">
-					Kamera i upload rade preko jscanify + OpenCV.js: detekcija ivica,
-					auto-capture logika i auto-crop.
+					Skeniranje radi preko scanner.js biblioteke: pokretanje scan dijaloga,
+					preuzimanje skeniranih strana i prikaz rezultata.
 				</p>
 			</div>
 			<div class="status-grid">
@@ -42,32 +42,32 @@
 		<section class="workspace">
 			<aside class="panel actions">
 				<h2>Akcije</h2>
-				<p>Koristi kameru ili upload slike. Obe putanje koriste isti jscanify engine.</p>
+				<p>Pokreni scanner.js scan dijalog ili uradi upload slike za lokalni prikaz.</p>
 
 				<div class="button-stack">
-					<button id="startCameraBtn" class="btn btn-primary" type="button">Pokreni kameru skener</button>
-					<button id="stopCameraBtn" class="btn btn-ghost" type="button" disabled>Zaustavi kameru</button>
+					<button id="startCameraBtn" class="btn btn-primary" type="button">Pokreni scanner.js scan</button>
+					<button id="stopCameraBtn" class="btn btn-ghost" type="button" disabled>Ocisti prikaz</button>
 					<label class="btn btn-upload" for="fileInput">Upload slike dokumenta</label>
 					<input id="fileInput" type="file" accept="image/*">
 				</div>
 
 				<p id="fileLabel" class="meta">Nijedna slika nije izabrana.</p>
 				<p class="note">
-					U produkciji hostuj OpenCV i jscanify lokalno umesto CDN varijante.
+					scanner.js zahteva Asprise Scan App za punu funkcionalnost skeniranja.
 				</p>
 			</aside>
 
 			<section class="panel scanner-panel">
 				<div class="panel-head">
-					<h2>Kamera (jscanify detekcija)</h2>
+					<h2>Scanner.js sesija</h2>
 					<span class="chip" id="cameraBadge">Neaktivno</span>
 				</div>
 				<div id="scannerContainer" class="scanner-container">
-					<div class="scanner-placeholder" id="cameraPlaceholder">Pokreni kameru da vidis live ivice i auto-crop.</div>
+					<div class="scanner-placeholder" id="cameraPlaceholder">Pokreni scan dijalog i skenirane slike ce se prikazati u rezultatima.</div>
 					<video id="cameraPreview" autoplay playsinline muted></video>
 					<canvas id="cameraOverlay" aria-hidden="true"></canvas>
 				</div>
-				<p class="meta">Auto-crop se aktivira kada je detekcija stabilna kroz vise frame-ova.</p>
+				<p class="meta">Live detekcija ivica nije deo scanner.js API-ja u browser preview modu.</p>
 			</section>
 
 			<section class="panel upload-panel">
@@ -98,8 +98,7 @@
 		</section>
 	</main>
 
-	<script src="https://docs.opencv.org/4.7.0/opencv.js" async></script>
-	<script src="https://cdn.jsdelivr.net/gh/ColonelParrot/jscanify@master/src/jscanify.min.js"></script>
+	<script src="https://asprise.azureedge.net/scannerjs/scanner.js"></script>
 	<script src="./script.js"></script>
 </body>
 </html>
