@@ -1,13 +1,16 @@
-# Scanner.js Document Scanner - Vanilla Web App
+# photoscan.js Document Scanner - Vanilla Web App
 
-Projekat je potpuno prebacen na **scanner.js (Asprise)**.
+Projekat je potpuno prebacen na **photoscan.js + OpenCV.js**.
 
 ## Sta sada radi
 
-- Pokretanje scanner.js scan dijaloga
-- Skeniranje preko dostupnog izvora (TWAIN/WIA uredjaji ili podrzani izvori)
-- Vracanje skeniranih slika kao base64 i prikaz u rezultat panelu
-- Upload slike dokumenta za lokalni prikaz u UI
+- Kamera skeniranje u browseru (`getUserMedia` + `photoscan.js`)
+- Live detekcija ivica dokumenta na video frame-ovima
+- Iscrtavanje ivica (polygon overlay) preko kamere
+- Auto-crop kada je detekcija stabilna kroz vise frame-ova
+- Upload slike dokumenta
+- Detekcija ivica na upload slici
+- Automatski crop i prikaz rezultata
 
 ## Pokretanje
 
@@ -25,10 +28,11 @@ http://localhost:8080
 
 ## Tehnologija
 
-- scanner.js preko CDN skripte:
-- `https://asprise.azureedge.net/scannerjs/scanner.js`
+- OpenCV.js preko CDN skripte:
+- `https://docs.opencv.org/4.7.0/opencv.js`
+- photoscan.js lokalni engine u projektu:
+- `./photoscan.js`
 
 ## Napomena za produkciju
 
-scanner.js za punu funkcionalnost zahteva Asprise Scan App instalaciju na masini korisnika.
-Za produkciju je preporuceno hostovanje scanner.js fajlova sa sopstvenog domena.
+Za produkciju hostuj OpenCV i photoscan.js bundle lokalno na svom domenu.
