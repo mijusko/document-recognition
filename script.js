@@ -134,6 +134,56 @@ function cornersToArray(corners) {
   return valid ? points : null;
 }
 
+function getSourceDimensions(source) {
+  const width = source?.videoWidth || source?.naturalWidth || source?.width || 0;
+  const height = source?.videoHeight || source?.naturalHeight || source?.height || 0;
+
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null;
+  }
+
+  return { width, height };
+}
+
+function getContourMetrics(corners, sourceWidth, sourceHeight) {
+  const points = cornersToArray(corners);
+  if (!points || !sourceWidth || !sourceHeight) {
+    return null;
+  }
+
+  const topWidth = pointDistance(corners.topLeft, corners.topRight);
+  const bottomWidth = pointDistance(corners.bottomLeft, corners.bottomRight);
+  const leftHeight = pointDistance(corners.topLeft, corners.bottomLeft);
+  const rightHeight = pointDistance(corners.topRight, corners.bottomRight);
+
+  const width = Math.max(topWidth, bottomWidth);
+  const height = Math.max(leftHeight, rightHeight);
+  const shorter = Math.max(1, Math.min(width, height));
+  const longer = Math.max(width, height);
+
+  return {
+    areaRatio: polygonArea(points) / (sourceWidth * sourceHeight),
+    longShortRatio: longer / shorter,
+  };
+}
+
+function isLikelyReceiptContour(metrics) {
+  if (!metrics) {
+    return false;
+  }
+
+  // QR region is usually a small, near-square contour; receipts are larger and elongated.
+  if (metrics.areaRatio < 0.085) {
+    return false;
+  }
+
+  if (metrics.longShortRatio < 1.18) {
+    return false;
+  }
+
+  return true;
+}
+
 function drawPolygon({ canvas, container, sourceWidth, sourceHeight, corners }) {
   const setup = setupCanvasForElement(canvas, container);
   if (!Array.isArray(corners) || corners.length !== 4) {
@@ -325,7 +375,13 @@ function ensureFrameBuffer() {
 function detectCorners(source) {
   let srcMat;
   let contour;
+  let fallbackContour;
   try {
+    const dims = getSourceDimensions(source);
+    if (!dims) {
+      return null;
+    }
+
     srcMat = window.cv.imread(source);
     contour = state.scanner.findPaperContour(srcMat);
     if (!contour || !contour.data32S || contour.data32S.length < 8) {
@@ -333,10 +389,50 @@ function detectCorners(source) {
     }
 
     const raw = state.scanner.getCornerPoints(contour);
-    return toDisplayCornerModel(raw);
+    const corners = toDisplayCornerModel(raw);
+    if (!corners) {
+      return null;
+    }
+
+    const metrics = getContourMetrics(corners, dims.width, dims.height);
+    if (isLikelyReceiptContour(metrics)) {
+      return corners;
+    }
+
+    if (metrics && metrics.longShortRatio < 1.18) {
+      const rect = window.cv.boundingRect(contour);
+      const pad = Math.round(Math.max(rect.width, rect.height) * 0.18);
+      const x1 = Math.max(0, rect.x - pad);
+      const y1 = Math.max(0, rect.y - pad);
+      const x2 = Math.min(dims.width - 1, rect.x + rect.width + pad);
+      const y2 = Math.min(dims.height - 1, rect.y + rect.height + pad);
+
+      window.cv.rectangle(
+        srcMat,
+        new window.cv.Point(x1, y1),
+        new window.cv.Point(x2, y2),
+        new window.cv.Scalar(255, 255, 255, 255),
+        window.cv.FILLED,
+      );
+
+      fallbackContour = state.scanner.findPaperContour(srcMat);
+      if (fallbackContour && fallbackContour.data32S && fallbackContour.data32S.length >= 8) {
+        const fallbackRaw = state.scanner.getCornerPoints(fallbackContour);
+        const fallbackCorners = toDisplayCornerModel(fallbackRaw);
+        const fallbackMetrics = getContourMetrics(fallbackCorners, dims.width, dims.height);
+        if (isLikelyReceiptContour(fallbackMetrics)) {
+          return fallbackCorners;
+        }
+      }
+    }
+
+    return null;
   } catch (error) {
     return null;
   } finally {
+    if (fallbackContour && typeof fallbackContour.delete === "function") {
+      fallbackContour.delete();
+    }
     if (contour && typeof contour.delete === "function") {
       contour.delete();
     }
