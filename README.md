@@ -1,18 +1,18 @@
-# Scanbot Web Document Scanner (Vanilla JS)
+# Document Scanner JS (WASM) - Vanilla Web App
 
-Ovaj projekat je resetovan od nule i sada koristi iskljucivo **Scanbot Web Document Scanner SDK**.
+Projekat je potpuno prebacen sa Scanbot SDK na **WASM document scanner engine (`scanic`)**.
 
-## Funkcionalnosti
+## Sta sada radi
 
-- Kamera skener preko Scanbot Classic UI (`createDocumentScanner`)
-- Live detekcija ivica dokumenta u kameri
-- Auto-capture u camera modu
+- Kamera skeniranje u browseru (`getUserMedia` + `scanic`)
+- Live detekcija ivica dokumenta na video frame-ovima
+- Iscrtavanje ivica (polygon overlay) preko kamere
+- Auto-crop kada je detekcija stabilna kroz vise frame-ova
 - Upload slike dokumenta
-- Detekcija ivica na upload slici (`detectDocument`)
-- Iscrtavanje detektovanog poligona preko slike
-- Auto-crop upload slike preko Scanbot Cropping View API
+- Detekcija ivica na upload slici
+- Automatski crop i prikaz rezultata
 
-## Brzi start
+## Pokretanje
 
 1. Pokreni staticki server iz root foldera:
 
@@ -20,20 +20,17 @@ Ovaj projekat je resetovan od nule i sada koristi iskljucivo **Scanbot Web Docum
 python -m http.server 8080
 ```
 
-2. Otvori:
+2. Otvori aplikaciju:
 
 ```text
 http://localhost:8080
 ```
 
-## License key
+## Tehnologija
 
-U [script.js](script.js) podesi:
+- `scanic` (WASM) preko CDN ESM importa:
+- `https://cdn.jsdelivr.net/npm/scanic/+esm`
 
-- `LICENSE_KEY`
+## Napomena za produkciju
 
-Napomena: bez license key-a SDK radi ograniceno (trial sesija).
-
-## Produkcija
-
-Za produkciju nemoj koristiti CDN import. Preporuka je da Scanbot bundle i wasm fajlove hostujes na svom domenu i postavis `enginePath` ka lokalnoj putanji.
+Za produkciju izbegni CDN i hostuj `scanic` bundle na svom domenu.

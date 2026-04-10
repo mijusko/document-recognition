@@ -1,13 +1,19 @@
-import "https://cdn.jsdelivr.net/npm/scanbot-web-sdk@8.1.1/bundle/ScanbotSDK.ui2.min.js";
-
-const ENGINE_PATH = "https://cdn.jsdelivr.net/npm/scanbot-web-sdk@8.1.1/bundle/bin/complete/";
-const LICENSE_KEY = "";
+import { Scanner, scanDocument } from "https://cdn.jsdelivr.net/npm/scanic/+esm";
 
 const state = {
-  sdk: null,
-  scannerHandle: null,
-  sdkReady: false,
-  lastUploadPolygon: [],
+  scanner: null,
+  wasmReady: false,
+  cameraStream: null,
+  cameraLoopId: null,
+  frameCanvas: null,
+  frameCtx: null,
+  runningDetection: false,
+  lastDetectionAt: 0,
+  detectionEveryMs: 130,
+  stableFrames: 0,
+  cooldownUntil: 0,
+  lastUploadCorners: null,
+  lastCameraCorners: null,
 };
 
 const refs = {
@@ -21,13 +27,15 @@ const refs = {
   cameraBadge: document.querySelector("#cameraBadge"),
   uploadBadge: document.querySelector("#uploadBadge"),
   scannerContainer: document.querySelector("#scannerContainer"),
+  cameraPlaceholder: document.querySelector("#cameraPlaceholder"),
+  cameraPreview: document.querySelector("#cameraPreview"),
+  cameraOverlay: document.querySelector("#cameraOverlay"),
   uploadStage: document.querySelector("#uploadStage"),
   uploadPreview: document.querySelector("#uploadPreview"),
   uploadOverlay: document.querySelector("#uploadOverlay"),
   uploadPlaceholder: document.querySelector("#uploadPlaceholder"),
   originalResult: document.querySelector("#originalResult"),
   croppedResult: document.querySelector("#croppedResult"),
-  autoCropContainer: document.querySelector("#autoCropContainer"),
 };
 
 function setSdkState(text) {
@@ -50,18 +58,6 @@ function setUploadBadge(text) {
   refs.uploadBadge.textContent = text;
 }
 
-function normalizePolygonPoint(point) {
-  if (Array.isArray(point) && point.length >= 2) {
-    return { x: Number(point[0]), y: Number(point[1]) };
-  }
-
-  if (point && typeof point === "object" && "x" in point && "y" in point) {
-    return { x: Number(point.x), y: Number(point.y) };
-  }
-
-  return null;
-}
-
 function getContainRect(sourceWidth, sourceHeight, containerWidth, containerHeight) {
   if (!sourceWidth || !sourceHeight || !containerWidth || !containerHeight) {
     return { x: 0, y: 0, width: containerWidth, height: containerHeight };
@@ -81,10 +77,9 @@ function getContainRect(sourceWidth, sourceHeight, containerWidth, containerHeig
   return { x: (containerWidth - width) / 2, y: 0, width, height };
 }
 
-function setupOverlayCanvas() {
-  const bounds = refs.uploadStage.getBoundingClientRect();
+function setupCanvasForElement(canvas, container) {
+  const bounds = container.getBoundingClientRect();
   const ratio = window.devicePixelRatio || 1;
-  const canvas = refs.uploadOverlay;
 
   canvas.width = Math.max(1, Math.round(bounds.width * ratio));
   canvas.height = Math.max(1, Math.round(bounds.height * ratio));
@@ -93,176 +88,292 @@ function setupOverlayCanvas() {
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, bounds.width, bounds.height);
 
-  return { context, width: bounds.width, height: bounds.height };
+  return {
+    context,
+    width: bounds.width,
+    height: bounds.height,
+  };
+}
+
+function cornersToArray(corners) {
+  if (!corners || typeof corners !== "object") {
+    return null;
+  }
+
+  const points = [
+    corners.topLeft,
+    corners.topRight,
+    corners.bottomRight,
+    corners.bottomLeft,
+  ];
+
+  const valid = points.every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (!valid) {
+    return null;
+  }
+
+  return points;
+}
+
+function drawPolygon({ canvas, container, sourceWidth, sourceHeight, corners }) {
+  const setup = setupCanvasForElement(canvas, container);
+  if (!Array.isArray(corners) || corners.length !== 4) {
+    return;
+  }
+
+  const mediaRect = getContainRect(sourceWidth, sourceHeight, setup.width, setup.height);
+  const scaled = corners.map((point) => ({
+    x: mediaRect.x + ((point.x / sourceWidth) * mediaRect.width),
+    y: mediaRect.y + ((point.y / sourceHeight) * mediaRect.height),
+  }));
+
+  setup.context.save();
+  setup.context.lineJoin = "round";
+  setup.context.lineCap = "round";
+  setup.context.lineWidth = 4;
+  setup.context.strokeStyle = "rgba(115, 255, 215, 0.96)";
+  setup.context.fillStyle = "rgba(115, 255, 215, 0.16)";
+  setup.context.shadowColor = "rgba(115, 255, 215, 0.42)";
+  setup.context.shadowBlur = 16;
+
+  setup.context.beginPath();
+  scaled.forEach((point, index) => {
+    if (index === 0) {
+      setup.context.moveTo(point.x, point.y);
+      return;
+    }
+    setup.context.lineTo(point.x, point.y);
+  });
+  setup.context.closePath();
+  setup.context.fill();
+  setup.context.stroke();
+
+  scaled.forEach((point, index) => {
+    setup.context.beginPath();
+    setup.context.arc(point.x, point.y, 5, 0, Math.PI * 2);
+    setup.context.fillStyle = index === 0 ? "rgba(255, 125, 58, 0.98)" : "rgba(250, 255, 253, 0.98)";
+    setup.context.fill();
+  });
+
+  setup.context.restore();
+}
+
+function clearUploadOverlay() {
+  state.lastUploadCorners = null;
+  setupCanvasForElement(refs.uploadOverlay, refs.uploadStage);
+}
+
+function clearCameraOverlay() {
+  state.lastCameraCorners = null;
+  setupCanvasForElement(refs.cameraOverlay, refs.scannerContainer);
 }
 
 function drawUploadOverlay() {
-  const points = state.lastUploadPolygon;
-  const preview = refs.uploadPreview;
-  const canvas = setupOverlayCanvas();
-
-  if (!Array.isArray(points) || points.length < 4 || !preview.naturalWidth || !preview.naturalHeight) {
+  const corners = cornersToArray(state.lastUploadCorners);
+  if (!corners || !refs.uploadPreview.naturalWidth || !refs.uploadPreview.naturalHeight) {
+    clearUploadOverlay();
     return;
   }
 
-  const normalized = points
-    .map(normalizePolygonPoint)
-    .filter((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
-
-  if (normalized.length < 4) {
-    return;
-  }
-
-  const mediaRect = getContainRect(
-    preview.naturalWidth,
-    preview.naturalHeight,
-    canvas.width,
-    canvas.height,
-  );
-
-  const scaled = normalized.map((point) => ({
-    x: mediaRect.x + (point.x * mediaRect.width),
-    y: mediaRect.y + (point.y * mediaRect.height),
-  }));
-
-  canvas.context.save();
-  canvas.context.lineJoin = "round";
-  canvas.context.lineCap = "round";
-  canvas.context.lineWidth = 4;
-  canvas.context.strokeStyle = "rgba(115, 255, 215, 0.96)";
-  canvas.context.fillStyle = "rgba(115, 255, 215, 0.16)";
-  canvas.context.shadowColor = "rgba(115, 255, 215, 0.44)";
-  canvas.context.shadowBlur = 14;
-
-  canvas.context.beginPath();
-  scaled.forEach((point, index) => {
-    if (index === 0) {
-      canvas.context.moveTo(point.x, point.y);
-      return;
-    }
-    canvas.context.lineTo(point.x, point.y);
+  drawPolygon({
+    canvas: refs.uploadOverlay,
+    container: refs.uploadStage,
+    sourceWidth: refs.uploadPreview.naturalWidth,
+    sourceHeight: refs.uploadPreview.naturalHeight,
+    corners,
   });
-  canvas.context.closePath();
-  canvas.context.fill();
-  canvas.context.stroke();
-
-  scaled.forEach((point, index) => {
-    canvas.context.beginPath();
-    canvas.context.arc(point.x, point.y, 5, 0, Math.PI * 2);
-    canvas.context.fillStyle = index === 0 ? "rgba(255, 125, 58, 0.98)" : "rgba(250, 255, 253, 0.98)";
-    canvas.context.fill();
-  });
-
-  canvas.context.restore();
 }
 
-async function initSdk() {
-  if (state.sdkReady && state.sdk) {
-    return state.sdk;
+function drawCameraOverlay() {
+  const corners = cornersToArray(state.lastCameraCorners);
+  const sourceWidth = refs.cameraPreview.videoWidth;
+  const sourceHeight = refs.cameraPreview.videoHeight;
+
+  if (!corners || !sourceWidth || !sourceHeight) {
+    clearCameraOverlay();
+    return;
   }
 
-  setSdkState("Ucitavam Scanbot SDK...");
-
-  state.sdk = await ScanbotSDK.initialize({
-    enginePath: ENGINE_PATH,
-    licenseKey: LICENSE_KEY,
-    onComplete(error) {
-      if (error) {
-        console.error("Scanbot init error", error);
-        setSdkState(`SDK greska: ${error.message || error}`);
-      }
-    },
+  drawPolygon({
+    canvas: refs.cameraOverlay,
+    container: refs.scannerContainer,
+    sourceWidth,
+    sourceHeight,
+    corners,
   });
+}
 
-  state.sdkReady = true;
-  setSdkState("SDK spreman");
-  return state.sdk;
+async function initScanner() {
+  if (state.wasmReady && state.scanner) {
+    return;
+  }
+
+  setSdkState("Ucitavam WASM engine...");
+  state.scanner = new Scanner();
+  await state.scanner.initialize();
+  state.wasmReady = true;
+  setSdkState("WASM spreman");
 }
 
 async function stopCameraScanner() {
-  if (state.scannerHandle) {
-    state.scannerHandle.dispose();
-    state.scannerHandle = null;
+  if (state.cameraLoopId) {
+    cancelAnimationFrame(state.cameraLoopId);
+    state.cameraLoopId = null;
   }
 
-  refs.scannerContainer.innerHTML = "<div class=\"scanner-placeholder\">Pokreni kameru da vidis live ivice i auto-capture.</div>";
+  if (state.cameraStream) {
+    state.cameraStream.getTracks().forEach((track) => track.stop());
+    state.cameraStream = null;
+  }
+
+  refs.cameraPreview.pause();
+  refs.cameraPreview.srcObject = null;
+  refs.cameraPreview.style.display = "none";
+  refs.cameraOverlay.style.display = "none";
+  refs.cameraPlaceholder.style.display = "grid";
+
   refs.startCameraBtn.disabled = false;
   refs.stopCameraBtn.disabled = true;
+
+  state.stableFrames = 0;
+  state.runningDetection = false;
+  clearCameraOverlay();
+
   setCameraBadge("Neaktivno");
   setActivity("Kamera zaustavljena");
 }
 
-async function startCameraScanner() {
+function ensureFrameBuffer() {
+  if (!state.frameCanvas) {
+    state.frameCanvas = document.createElement("canvas");
+    state.frameCtx = state.frameCanvas.getContext("2d", { willReadFrequently: true });
+  }
+
+  const width = refs.cameraPreview.videoWidth;
+  const height = refs.cameraPreview.videoHeight;
+
+  if (width && height) {
+    state.frameCanvas.width = width;
+    state.frameCanvas.height = height;
+  }
+}
+
+async function autoCropCurrentFrame(corners) {
+  if (!state.frameCanvas) {
+    return;
+  }
+
+  const original = state.frameCanvas.toDataURL("image/jpeg", 0.92);
+  refs.originalResult.src = original;
+
+  const extracted = await state.scanner.extract(state.frameCanvas, corners, { output: "dataurl" });
+  if (extracted.success && extracted.output) {
+    refs.croppedResult.src = extracted.output;
+    setActivity("Auto-crop zavrsen (kamera)");
+  }
+}
+
+async function runCameraDetectionTick() {
+  if (!state.cameraStream || state.runningDetection) {
+    return;
+  }
+
+  const now = performance.now();
+  if (now - state.lastDetectionAt < state.detectionEveryMs) {
+    return;
+  }
+  state.lastDetectionAt = now;
+
+  ensureFrameBuffer();
+  if (!state.frameCanvas.width || !state.frameCanvas.height) {
+    return;
+  }
+
+  state.frameCtx.drawImage(refs.cameraPreview, 0, 0, state.frameCanvas.width, state.frameCanvas.height);
+
+  state.runningDetection = true;
   try {
-    await initSdk();
-    await stopCameraScanner();
+    const detection = await state.scanner.scan(state.frameCanvas, {
+      mode: "detect",
+      maxProcessingDimension: 860,
+      lowThreshold: 65,
+      highThreshold: 180,
+      minArea: 2500,
+    });
 
-    refs.scannerContainer.innerHTML = "";
-    refs.startCameraBtn.disabled = true;
-    refs.stopCameraBtn.disabled = false;
-    setCameraBadge("Aktivno");
-    setActivity("Pokrecem live skener");
+    if (detection.success && detection.corners) {
+      state.lastCameraCorners = detection.corners;
+      drawCameraOverlay();
+      setDetection("Dokument pronadjen");
 
-    state.scannerHandle = await state.sdk.createDocumentScanner({
-      containerId: "scannerContainer",
-      autoCaptureEnabled: true,
-      autoCaptureSensitivity: 0.72,
-      scannerConfiguration: {
-        parameters: {
-          acceptedAngleScore: 60,
-          acceptedSizeScore: 60,
-          ignoreOrientationMismatch: true,
-        },
-      },
-      style: {
-        outline: {
-          polygon: {
-            strokeWidthCapturing: 4,
-            fillCapturing: "rgba(115, 255, 215, 0.14)",
-            strokeCapturing: "#73ffd7",
-            strokeWidthSearching: 3,
-            fillSearching: "rgba(255, 146, 93, 0.1)",
-            strokeSearching: "#ff925d",
-          },
-        },
-      },
-      onDocumentDetected: async (response) => {
-        const detectionResult = response?.result?.detectionResult;
-        setDetection(detectionResult?.status || "OK");
-        setActivity("Dokument detektovan (kamera)");
-        setCameraBadge("Detektovano");
+      state.stableFrames += 1;
+      if (state.stableFrames >= 4 && Date.now() > state.cooldownUntil) {
+        state.cooldownUntil = Date.now() + 2600;
+        state.stableFrames = 0;
 
-        const displayedImage = response?.result?.croppedImage ?? response?.originalImage;
-        if (displayedImage) {
-          const jpeg = await state.sdk.imageToJpeg(displayedImage);
-          const dataUrl = await state.sdk.toDataUrl(jpeg);
-          refs.croppedResult.src = dataUrl;
-        }
-
-        if (response?.originalImage) {
-          const originalJpeg = await state.sdk.imageToJpeg(response.originalImage);
-          const originalDataUrl = await state.sdk.toDataUrl(originalJpeg);
-          refs.originalResult.src = originalDataUrl;
-        }
-
+        setCameraBadge("Auto-crop...");
+        await autoCropCurrentFrame(detection.corners);
         window.setTimeout(() => {
-          if (state.scannerHandle) {
+          if (state.cameraStream) {
             setCameraBadge("Aktivno");
           }
-        }, 1200);
-      },
-      onError: (error) => {
-        console.error("Camera scanner error", error);
-        setActivity("Greska pri radu kamere");
-      },
-    });
+        }, 900);
+      }
+    } else {
+      state.stableFrames = 0;
+      clearCameraOverlay();
+      setDetection("Cekam dokument");
+    }
   } catch (error) {
-    console.error("Failed to start camera scanner", error);
-    setActivity("Neuspesno pokretanje kamere");
-    setDetection("Greska");
-    refs.startCameraBtn.disabled = false;
-    refs.stopCameraBtn.disabled = true;
+    console.error("Camera detection error", error);
+    setDetection("Greska detekcije");
+  } finally {
+    state.runningDetection = false;
+  }
+}
+
+function cameraLoop() {
+  void runCameraDetectionTick();
+
+  if (state.cameraStream) {
+    state.cameraLoopId = requestAnimationFrame(cameraLoop);
+  }
+}
+
+async function startCameraScanner() {
+  try {
+    await initScanner();
+    await stopCameraScanner();
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+      },
+      audio: false,
+    });
+
+    state.cameraStream = stream;
+    refs.cameraPreview.srcObject = stream;
+
+    await refs.cameraPreview.play();
+
+    refs.cameraPreview.style.display = "block";
+    refs.cameraOverlay.style.display = "block";
+    refs.cameraPlaceholder.style.display = "none";
+
+    refs.startCameraBtn.disabled = true;
+    refs.stopCameraBtn.disabled = false;
+
+    setCameraBadge("Aktivno");
+    setActivity("Live kamera aktivna");
+    setDetection("Cekam dokument");
+
+    cameraLoop();
+  } catch (error) {
+    console.error("Could not start camera", error);
+    await stopCameraScanner();
     setCameraBadge("Greska");
+    setActivity("Ne mogu da pokrenem kameru");
   }
 }
 
@@ -272,95 +383,70 @@ function setUploadPreview(dataUrl) {
   refs.uploadPlaceholder.style.display = "none";
 }
 
-function clearUploadOverlay() {
-  state.lastUploadPolygon = [];
-  setupOverlayCanvas();
-}
-
-async function runAutoCrop(image, polygon) {
-  const cropper = await state.sdk.openCroppingView({
-    containerId: "autoCropContainer",
-    image,
-    polygon,
-    disableScroll: true,
-    rotations: 0,
-    style: {
-      padding: 0,
-      polygon: {
-        color: "#73ffd7",
-        width: 2,
-        handles: {
-          size: 10,
-          color: "white",
-          border: "1px solid #d5d5d5",
-        },
-      },
-      magneticLines: {
-        color: "#ff6c45",
-      },
-    },
+async function loadImageFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = dataUrl;
   });
-
-  try {
-    await cropper.detect();
-    const result = await cropper.apply();
-    return result?.image ?? null;
-  } finally {
-    cropper.dispose();
-  }
 }
 
-async function handleFileUpload(file) {
+async function processUpload(file) {
   try {
-    await initSdk();
+    await initScanner();
 
     refs.fileLabel.textContent = `Fajl: ${file.name}`;
-    setUploadBadge("Analiziram sliku");
-    setActivity("Pokrenuta detekcija na upload slici");
+    setUploadBadge("Analiziram");
+    setActivity("Upload analiza pokrenuta");
 
-    const buffer = new Uint8Array(await file.arrayBuffer());
-    const image = ScanbotSDK.Config.Image.fromEncodedBinaryData(buffer);
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
 
-    const originalJpeg = await state.sdk.imageToJpeg(image);
-    const originalDataUrl = await state.sdk.toDataUrl(originalJpeg);
-    refs.originalResult.src = originalDataUrl;
-    setUploadPreview(originalDataUrl);
+    setUploadPreview(dataUrl);
+    refs.originalResult.src = dataUrl;
 
-    const detection = await state.sdk.detectDocument(image);
-    const status = detection?.status || "NOT_ACQUIRED";
-    const polygon = Array.isArray(detection?.pointsNormalized) ? detection.pointsNormalized : [];
+    const image = await loadImageFromDataUrl(dataUrl);
+    const detection = await scanDocument(image, {
+      mode: "detect",
+      maxProcessingDimension: 1100,
+      lowThreshold: 60,
+      highThreshold: 170,
+      minArea: 1500,
+    });
 
-    setDetection(status);
-    state.lastUploadPolygon = polygon;
-    drawUploadOverlay();
-
-    if (status !== "OK" || polygon.length < 4) {
+    if (!detection.success || !detection.corners) {
       setUploadBadge("Nije nadjen dokument");
+      setDetection("Nije detektovano");
       refs.croppedResult.removeAttribute("src");
-      setActivity("Detekcija zavrsena bez validnog dokumenta");
+      clearUploadOverlay();
       return;
     }
 
+    state.lastUploadCorners = detection.corners;
+    drawUploadOverlay();
     setUploadBadge("Ivice detektovane");
-    const croppedImage = await runAutoCrop(image, polygon);
+    setDetection("Dokument pronadjen");
 
-    if (!croppedImage) {
+    const extracted = await state.scanner.extract(image, detection.corners, { output: "dataurl" });
+    if (extracted.success && extracted.output) {
+      refs.croppedResult.src = extracted.output;
+      setUploadBadge("Auto-crop zavrsen");
+      setActivity("Upload detekcija i crop zavrseni");
+    } else {
       refs.croppedResult.removeAttribute("src");
-      setActivity("Auto-crop nije uspeo");
-      return;
+      setUploadBadge("Crop neuspesan");
+      setActivity("Detekcija uspela, crop neuspesan");
     }
-
-    const croppedJpeg = await state.sdk.imageToJpeg(croppedImage);
-    const croppedDataUrl = await state.sdk.toDataUrl(croppedJpeg);
-    refs.croppedResult.src = croppedDataUrl;
-
-    setActivity("Upload detekcija i auto-crop zavrseni");
-    setUploadBadge("Auto-crop zavrsen");
   } catch (error) {
-    console.error("Upload processing failed", error);
+    console.error("Upload processing error", error);
     clearUploadOverlay();
     setUploadBadge("Greska");
-    setActivity("Greska u upload analizi");
+    setActivity("Greska tokom upload analize");
     setDetection("Greska");
   }
 }
@@ -381,7 +467,7 @@ function wireEvents() {
       return;
     }
 
-    void handleFileUpload(file);
+    void processUpload(file);
     input.value = "";
   });
 
@@ -391,6 +477,13 @@ function wireEvents() {
 
   window.addEventListener("resize", () => {
     drawUploadOverlay();
+    drawCameraOverlay();
+  });
+
+  window.addEventListener("beforeunload", () => {
+    if (state.cameraStream) {
+      state.cameraStream.getTracks().forEach((track) => track.stop());
+    }
   });
 }
 
@@ -398,11 +491,12 @@ async function bootstrap() {
   wireEvents();
 
   try {
-    await initSdk();
-    setActivity("Spreman za kameru ili upload");
+    await initScanner();
+    setActivity("Spreman za kameru i upload");
+    setDetection("Ceka skeniranje");
   } catch (error) {
-    console.error("SDK bootstrap failed", error);
-    setSdkState("SDK inicijalizacija nije uspela");
+    console.error("WASM bootstrap failed", error);
+    setSdkState("WASM inicijalizacija nije uspela");
     setActivity("Aplikacija nije spremna");
     setDetection("Greska");
   }

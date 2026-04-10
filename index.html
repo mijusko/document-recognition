@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Scanbot Web Document Scanner</title>
+	<title>Document Scanner JS (WASM)</title>
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 	<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -16,16 +16,16 @@
 	<main class="layout">
 		<header class="hero panel">
 			<div>
-				<p class="label">Scanbot SDK / Vanilla JS</p>
+				<p class="label">Document Scanner JS / WASM</p>
 				<h1>Skener dokumenata od nule</h1>
 				<p class="lead">
-					Kamera i upload rade iskljucivo preko Scanbot Web SDK-a: detekcija ivica,
-					auto-capture i auto-crop.
+					Kamera i upload rade preko WASM document scanner engine-a (scanic):
+					detekcija ivica, auto-capture logika i auto-crop.
 				</p>
 			</div>
 			<div class="status-grid">
 				<div class="status-tile">
-					<span>SDK status</span>
+					<span>WASM status</span>
 					<strong id="sdkState">Inicijalizacija...</strong>
 				</div>
 				<div class="status-tile">
@@ -42,7 +42,7 @@
 		<section class="workspace">
 			<aside class="panel actions">
 				<h2>Akcije</h2>
-				<p>Koristi kameru ili upload slike. Obe putanje koriste Scanbot engine.</p>
+				<p>Koristi kameru ili upload slike. Obe putanje koriste isti WASM scanner engine.</p>
 
 				<div class="button-stack">
 					<button id="startCameraBtn" class="btn btn-primary" type="button">Pokreni kameru skener</button>
@@ -53,18 +53,21 @@
 
 				<p id="fileLabel" class="meta">Nijedna slika nije izabrana.</p>
 				<p class="note">
-					Za produkciju obavezno hostuj Scanbot bundle lokalno i unesi validan license key.
+					U produkciji hostuj `scanic` bundle lokalno umesto CDN varijante.
 				</p>
 			</aside>
 
 			<section class="panel scanner-panel">
 				<div class="panel-head">
-					<h2>Kamera (Scanbot Classic UI)</h2>
+					<h2>Kamera (WASM detekcija)</h2>
 					<span class="chip" id="cameraBadge">Neaktivno</span>
 				</div>
 				<div id="scannerContainer" class="scanner-container">
-					<div class="scanner-placeholder">Pokreni kameru da vidis live ivice i auto-capture.</div>
+					<div class="scanner-placeholder" id="cameraPlaceholder">Pokreni kameru da vidis live ivice i auto-crop.</div>
+					<video id="cameraPreview" autoplay playsinline muted></video>
+					<canvas id="cameraOverlay" aria-hidden="true"></canvas>
 				</div>
+				<p class="meta">Auto-crop se aktivira kada je detekcija stabilna kroz vise frame-ova.</p>
 			</section>
 
 			<section class="panel upload-panel">
@@ -94,8 +97,6 @@
 			</section>
 		</section>
 	</main>
-
-	<div id="autoCropContainer" class="crop-host" aria-hidden="true"></div>
 
 	<script type="module" src="./script.js"></script>
 </body>

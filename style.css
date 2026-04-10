@@ -284,6 +284,20 @@ input {
 	color: rgba(245, 245, 245, 0.78);
 }
 
+#cameraPreview,
+#cameraOverlay {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	display: none;
+}
+
+#cameraOverlay {
+	pointer-events: none;
+}
+
 .upload-stage {
 	height: 430px;
 	position: relative;
@@ -357,17 +371,6 @@ input {
 	background: rgba(18, 18, 18, 0.9);
 	border-radius: 12px;
 	border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.crop-host {
-	position: fixed;
-	top: 0;
-	left: -200vw;
-	width: 360px;
-	height: 240px;
-	opacity: 0;
-	pointer-events: none;
-	overflow: hidden;
 }
 
 @media (max-width: 1160px) {

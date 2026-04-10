@@ -1,2 +1,2 @@
 // Legacy worker removed.
-// The app now uses only Scanbot Web SDK APIs from script.js.
+// The app now uses the scanic WASM scanner directly from script.js.
