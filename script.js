@@ -1,8 +1,6 @@
-import { Scanner, scanDocument } from "https://cdn.jsdelivr.net/npm/scanic/+esm";
-
 const state = {
   scanner: null,
-  wasmReady: false,
+  engineReady: false,
   cameraStream: null,
   cameraLoopId: null,
   frameCanvas: null,
@@ -95,6 +93,31 @@ function setupCanvasForElement(canvas, container) {
   };
 }
 
+function toDisplayCornerModel(corners) {
+  if (!corners || typeof corners !== "object") {
+    return null;
+  }
+
+  const model = {
+    topLeft: corners.topLeftCorner,
+    topRight: corners.topRightCorner,
+    bottomRight: corners.bottomRightCorner,
+    bottomLeft: corners.bottomLeftCorner,
+  };
+
+  const valid = Object.values(model).every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+  return valid ? model : null;
+}
+
+function toJscanifyCornerModel(corners) {
+  return {
+    topLeftCorner: corners.topLeft,
+    topRightCorner: corners.topRight,
+    bottomRightCorner: corners.bottomRight,
+    bottomLeftCorner: corners.bottomLeft,
+  };
+}
+
 function cornersToArray(corners) {
   if (!corners || typeof corners !== "object") {
     return null;
@@ -108,11 +131,7 @@ function cornersToArray(corners) {
   ];
 
   const valid = points.every((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
-  if (!valid) {
-    return null;
-  }
-
-  return points;
+  return valid ? points : null;
 }
 
 function drawPolygon({ canvas, container, sourceWidth, sourceHeight, corners }) {
@@ -203,16 +222,170 @@ function drawCameraOverlay() {
   });
 }
 
+function waitForJscanify(timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const check = () => {
+      if (typeof window.jscanify === "function") {
+        resolve();
+        return;
+      }
+
+      if (Date.now() - start >= timeoutMs) {
+        reject(new Error("jscanify nije ucitan."));
+        return;
+      }
+
+      window.setTimeout(check, 50);
+    };
+
+    check();
+  });
+}
+
+function waitForOpenCv(timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    let finished = false;
+    let runtimeHooked = false;
+
+    const done = (error) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+
+    const hookRuntimeInit = () => {
+      if (!window.cv || runtimeHooked) {
+        return;
+      }
+
+      runtimeHooked = true;
+      const previous = window.cv.onRuntimeInitialized;
+      window.cv.onRuntimeInitialized = () => {
+        if (typeof previous === "function") {
+          previous();
+        }
+        done();
+      };
+    };
+
+    const check = () => {
+      if (window.cv && typeof window.cv.Mat === "function") {
+        done();
+        return;
+      }
+
+      hookRuntimeInit();
+      if (Date.now() - start >= timeoutMs) {
+        done(new Error("OpenCV runtime nije spreman."));
+        return;
+      }
+
+      window.setTimeout(check, 50);
+    };
+
+    check();
+  });
+}
+
 async function initScanner() {
-  if (state.wasmReady && state.scanner) {
+  if (state.engineReady && state.scanner) {
     return;
   }
 
-  setSdkState("Ucitavam WASM engine...");
-  state.scanner = new Scanner();
-  await state.scanner.initialize();
-  state.wasmReady = true;
-  setSdkState("WASM spreman");
+  setSdkState("Ucitavam OpenCV i jscanify...");
+  await waitForJscanify();
+  await waitForOpenCv();
+  state.scanner = new window.jscanify();
+  state.engineReady = true;
+  setSdkState("Engine spreman");
+}
+
+function ensureFrameBuffer() {
+  if (!state.frameCanvas) {
+    state.frameCanvas = document.createElement("canvas");
+    state.frameCtx = state.frameCanvas.getContext("2d", { willReadFrequently: true });
+  }
+
+  const width = refs.cameraPreview.videoWidth;
+  const height = refs.cameraPreview.videoHeight;
+  if (width && height) {
+    state.frameCanvas.width = width;
+    state.frameCanvas.height = height;
+  }
+}
+
+function detectCorners(source) {
+  let srcMat;
+  let contour;
+  try {
+    srcMat = window.cv.imread(source);
+    contour = state.scanner.findPaperContour(srcMat);
+    if (!contour || !contour.data32S || contour.data32S.length < 8) {
+      return null;
+    }
+
+    const raw = state.scanner.getCornerPoints(contour);
+    return toDisplayCornerModel(raw);
+  } catch (error) {
+    return null;
+  } finally {
+    if (contour && typeof contour.delete === "function") {
+      contour.delete();
+    }
+    if (srcMat && typeof srcMat.delete === "function") {
+      srcMat.delete();
+    }
+  }
+}
+
+function pointDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function polygonArea(points) {
+  let area = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    area += current.x * next.y - next.x * current.y;
+  }
+  return Math.abs(area / 2);
+}
+
+function estimateExtractionSize(corners) {
+  const width = Math.max(
+    pointDistance(corners.topLeft, corners.topRight),
+    pointDistance(corners.bottomLeft, corners.bottomRight),
+  );
+
+  const height = Math.max(
+    pointDistance(corners.topLeft, corners.bottomLeft),
+    pointDistance(corners.topRight, corners.bottomRight),
+  );
+
+  return {
+    width: Math.max(140, Math.round(width)),
+    height: Math.max(140, Math.round(height)),
+  };
+}
+
+function extractDocument(source, corners) {
+  const size = estimateExtractionSize(corners);
+  const cropped = state.scanner.extractPaper(
+    source,
+    size.width,
+    size.height,
+    toJscanifyCornerModel(corners),
+  );
+  return cropped ? cropped.toDataURL("image/jpeg", 0.92) : null;
 }
 
 async function stopCameraScanner() {
@@ -231,31 +404,14 @@ async function stopCameraScanner() {
   refs.cameraPreview.style.display = "none";
   refs.cameraOverlay.style.display = "none";
   refs.cameraPlaceholder.style.display = "grid";
-
   refs.startCameraBtn.disabled = false;
   refs.stopCameraBtn.disabled = true;
 
   state.stableFrames = 0;
   state.runningDetection = false;
   clearCameraOverlay();
-
   setCameraBadge("Neaktivno");
   setActivity("Kamera zaustavljena");
-}
-
-function ensureFrameBuffer() {
-  if (!state.frameCanvas) {
-    state.frameCanvas = document.createElement("canvas");
-    state.frameCtx = state.frameCanvas.getContext("2d", { willReadFrequently: true });
-  }
-
-  const width = refs.cameraPreview.videoWidth;
-  const height = refs.cameraPreview.videoHeight;
-
-  if (width && height) {
-    state.frameCanvas.width = width;
-    state.frameCanvas.height = height;
-  }
 }
 
 async function autoCropCurrentFrame(corners) {
@@ -263,12 +419,10 @@ async function autoCropCurrentFrame(corners) {
     return;
   }
 
-  const original = state.frameCanvas.toDataURL("image/jpeg", 0.92);
-  refs.originalResult.src = original;
-
-  const extracted = await state.scanner.extract(state.frameCanvas, corners, { output: "dataurl" });
-  if (extracted.success && extracted.output) {
-    refs.croppedResult.src = extracted.output;
+  refs.originalResult.src = state.frameCanvas.toDataURL("image/jpeg", 0.92);
+  const cropDataUrl = extractDocument(state.frameCanvas, corners);
+  if (cropDataUrl) {
+    refs.croppedResult.src = cropDataUrl;
     setActivity("Auto-crop zavrsen (kamera)");
   }
 }
@@ -293,26 +447,25 @@ async function runCameraDetectionTick() {
 
   state.runningDetection = true;
   try {
-    const detection = await state.scanner.scan(state.frameCanvas, {
-      mode: "detect",
-      maxProcessingDimension: 860,
-      lowThreshold: 65,
-      highThreshold: 180,
-      minArea: 2500,
-    });
-
-    if (detection.success && detection.corners) {
-      state.lastCameraCorners = detection.corners;
+    const corners = detectCorners(state.frameCanvas);
+    if (corners) {
+      state.lastCameraCorners = corners;
       drawCameraOverlay();
       setDetection("Dokument pronadjen");
 
-      state.stableFrames += 1;
+      const points = cornersToArray(corners);
+      const areaRatio = polygonArea(points) / (state.frameCanvas.width * state.frameCanvas.height);
+      if (areaRatio > 0.14) {
+        state.stableFrames += 1;
+      } else {
+        state.stableFrames = 0;
+      }
+
       if (state.stableFrames >= 4 && Date.now() > state.cooldownUntil) {
         state.cooldownUntil = Date.now() + 2600;
         state.stableFrames = 0;
-
         setCameraBadge("Auto-crop...");
-        await autoCropCurrentFrame(detection.corners);
+        await autoCropCurrentFrame(corners);
         window.setTimeout(() => {
           if (state.cameraStream) {
             setCameraBadge("Aktivno");
@@ -334,7 +487,6 @@ async function runCameraDetectionTick() {
 
 function cameraLoop() {
   void runCameraDetectionTick();
-
   if (state.cameraStream) {
     state.cameraLoopId = requestAnimationFrame(cameraLoop);
   }
@@ -346,21 +498,17 @@ async function startCameraScanner() {
     await stopCameraScanner();
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-      },
+      video: { facingMode: { ideal: "environment" } },
       audio: false,
     });
 
     state.cameraStream = stream;
     refs.cameraPreview.srcObject = stream;
-
     await refs.cameraPreview.play();
 
     refs.cameraPreview.style.display = "block";
     refs.cameraOverlay.style.display = "block";
     refs.cameraPlaceholder.style.display = "none";
-
     refs.startCameraBtn.disabled = true;
     refs.stopCameraBtn.disabled = false;
 
@@ -395,7 +543,6 @@ async function loadImageFromDataUrl(dataUrl) {
 async function processUpload(file) {
   try {
     await initScanner();
-
     refs.fileLabel.textContent = `Fajl: ${file.name}`;
     setUploadBadge("Analiziram");
     setActivity("Upload analiza pokrenuta");
@@ -411,15 +558,9 @@ async function processUpload(file) {
     refs.originalResult.src = dataUrl;
 
     const image = await loadImageFromDataUrl(dataUrl);
-    const detection = await scanDocument(image, {
-      mode: "detect",
-      maxProcessingDimension: 1100,
-      lowThreshold: 60,
-      highThreshold: 170,
-      minArea: 1500,
-    });
+    const corners = detectCorners(image);
 
-    if (!detection.success || !detection.corners) {
+    if (!corners) {
       setUploadBadge("Nije nadjen dokument");
       setDetection("Nije detektovano");
       refs.croppedResult.removeAttribute("src");
@@ -427,14 +568,14 @@ async function processUpload(file) {
       return;
     }
 
-    state.lastUploadCorners = detection.corners;
+    state.lastUploadCorners = corners;
     drawUploadOverlay();
     setUploadBadge("Ivice detektovane");
     setDetection("Dokument pronadjen");
 
-    const extracted = await state.scanner.extract(image, detection.corners, { output: "dataurl" });
-    if (extracted.success && extracted.output) {
-      refs.croppedResult.src = extracted.output;
+    const cropDataUrl = extractDocument(image, corners);
+    if (cropDataUrl) {
+      refs.croppedResult.src = cropDataUrl;
       setUploadBadge("Auto-crop zavrsen");
       setActivity("Upload detekcija i crop zavrseni");
     } else {
@@ -495,8 +636,8 @@ async function bootstrap() {
     setActivity("Spreman za kameru i upload");
     setDetection("Ceka skeniranje");
   } catch (error) {
-    console.error("WASM bootstrap failed", error);
-    setSdkState("WASM inicijalizacija nije uspela");
+    console.error("Engine bootstrap failed", error);
+    setSdkState("Inicijalizacija nije uspela");
     setActivity("Aplikacija nije spremna");
     setDetection("Greska");
   }

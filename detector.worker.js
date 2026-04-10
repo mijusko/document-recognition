@@ -1,2 +1,2 @@
 // Legacy worker removed.
-// The app now uses the scanic WASM scanner directly from script.js.
+// The app now uses jscanify + OpenCV.js directly from script.js.

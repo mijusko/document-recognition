@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Document Scanner JS (WASM)</title>
+	<title>jscanify Document Scanner</title>
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 	<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -16,16 +16,16 @@
 	<main class="layout">
 		<header class="hero panel">
 			<div>
-				<p class="label">Document Scanner JS / WASM</p>
+				<p class="label">jscanify / OpenCV.js</p>
 				<h1>Skener dokumenata od nule</h1>
 				<p class="lead">
-					Kamera i upload rade preko WASM document scanner engine-a (scanic):
-					detekcija ivica, auto-capture logika i auto-crop.
+					Kamera i upload rade preko jscanify + OpenCV.js: detekcija ivica,
+					auto-capture logika i auto-crop.
 				</p>
 			</div>
 			<div class="status-grid">
 				<div class="status-tile">
-					<span>WASM status</span>
+					<span>Engine status</span>
 					<strong id="sdkState">Inicijalizacija...</strong>
 				</div>
 				<div class="status-tile">
@@ -42,7 +42,7 @@
 		<section class="workspace">
 			<aside class="panel actions">
 				<h2>Akcije</h2>
-				<p>Koristi kameru ili upload slike. Obe putanje koriste isti WASM scanner engine.</p>
+				<p>Koristi kameru ili upload slike. Obe putanje koriste isti jscanify engine.</p>
 
 				<div class="button-stack">
 					<button id="startCameraBtn" class="btn btn-primary" type="button">Pokreni kameru skener</button>
@@ -53,13 +53,13 @@
 
 				<p id="fileLabel" class="meta">Nijedna slika nije izabrana.</p>
 				<p class="note">
-					U produkciji hostuj `scanic` bundle lokalno umesto CDN varijante.
+					U produkciji hostuj OpenCV i jscanify lokalno umesto CDN varijante.
 				</p>
 			</aside>
 
 			<section class="panel scanner-panel">
 				<div class="panel-head">
-					<h2>Kamera (WASM detekcija)</h2>
+					<h2>Kamera (jscanify detekcija)</h2>
 					<span class="chip" id="cameraBadge">Neaktivno</span>
 				</div>
 				<div id="scannerContainer" class="scanner-container">
@@ -98,6 +98,8 @@
 		</section>
 	</main>
 
-	<script type="module" src="./script.js"></script>
+	<script src="https://docs.opencv.org/4.7.0/opencv.js" async></script>
+	<script src="https://cdn.jsdelivr.net/gh/ColonelParrot/jscanify@master/src/jscanify.min.js"></script>
+	<script src="./script.js"></script>
 </body>
 </html>

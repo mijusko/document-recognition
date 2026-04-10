@@ -1,10 +1,10 @@
-# Document Scanner JS (WASM) - Vanilla Web App
+# jscanify Document Scanner - Vanilla Web App
 
-Projekat je potpuno prebacen sa Scanbot SDK na **WASM document scanner engine (`scanic`)**.
+Projekat je potpuno prebacen na **jscanify + OpenCV.js**.
 
 ## Sta sada radi
 
-- Kamera skeniranje u browseru (`getUserMedia` + `scanic`)
+- Kamera skeniranje u browseru (`getUserMedia` + `jscanify`)
 - Live detekcija ivica dokumenta na video frame-ovima
 - Iscrtavanje ivica (polygon overlay) preko kamere
 - Auto-crop kada je detekcija stabilna kroz vise frame-ova
@@ -28,9 +28,11 @@ http://localhost:8080
 
 ## Tehnologija
 
-- `scanic` (WASM) preko CDN ESM importa:
-- `https://cdn.jsdelivr.net/npm/scanic/+esm`
+- OpenCV.js preko CDN skripte:
+- `https://docs.opencv.org/4.7.0/opencv.js`
+- jscanify preko CDN skripte:
+- `https://cdn.jsdelivr.net/gh/ColonelParrot/jscanify@master/src/jscanify.min.js`
 
 ## Napomena za produkciju
 
-Za produkciju izbegni CDN i hostuj `scanic` bundle na svom domenu.
+Za produkciju izbegni CDN i hostuj OpenCV i jscanify bundle lokalno na svom domenu.
