@@ -106,14 +106,65 @@ def _opencv_style_detect(gray, mode):
     }
 
 
+def _tracked_roi_candidate(gray, prev_corners):
+    frame_h, frame_w = gray.shape
+    quad = np.asarray(prev_corners, dtype=float)
+    if quad.shape != (4, 2):
+        return None
+
+    quad[:, 0] = np.clip(quad[:, 0], 0, frame_w - 1)
+    quad[:, 1] = np.clip(quad[:, 1], 0, frame_h - 1)
+    center = np.mean(quad, axis=0)
+    expanded = center + ((quad - center) * 1.28)
+    expanded[:, 0] = np.clip(expanded[:, 0], 0, frame_w - 1)
+    expanded[:, 1] = np.clip(expanded[:, 1], 0, frame_h - 1)
+
+    min_x = int(max(0, np.floor(np.min(expanded[:, 0]))))
+    max_x = int(min(frame_w, np.ceil(np.max(expanded[:, 0])) + 1))
+    min_y = int(max(0, np.floor(np.min(expanded[:, 1]))))
+    max_y = int(min(frame_h, np.ceil(np.max(expanded[:, 1])) + 1))
+    if (max_x - min_x) < 80 or (max_y - min_y) < 80:
+        return None
+
+    roi_gray = gray[min_y:max_y, min_x:max_x]
+    candidate = _opencv_style_detect(roi_gray, "camera")
+    if candidate is None:
+        return None
+
+    candidate["corners"][:, 0] += float(min_x)
+    candidate["corners"][:, 1] += float(min_y)
+    area = _polygon_area(candidate["corners"])
+    candidate["area_ratio"] = float(np.clip(area / max((frame_w * frame_h), 1), 0.0, 1.0))
+    candidate["confidence"] = float(np.clip(candidate.get("confidence", 0.0) + 0.08, 0.0, 1.0))
+    return candidate
+
+
+def _detect_with_tracking(gray, mode, hints_json):
+    if mode != "camera" or not hints_json:
+        return _opencv_style_detect(gray, mode)
+
+    try:
+        hints = json.loads(hints_json)
+    except Exception:
+        hints = {}
+
+    prev_corners = hints.get("prev_corners") if isinstance(hints, dict) else None
+    if isinstance(prev_corners, list) and len(prev_corners) == 4:
+        tracked = _tracked_roi_candidate(gray, prev_corners)
+        if tracked is not None:
+            return tracked
+
+    return _opencv_style_detect(gray, mode)
+
+
 def detect_document_json(pixels, width, height, mode="upload", hints_json=""):
     image = np.asarray(pixels, dtype=np.uint8).reshape((height, width, 4))
     rgb = image[..., :3].astype(np.float32) / 255.0
     gray = color.rgb2gray(rgb)
-    candidate = _opencv_style_detect(gray, mode)
+    candidate = _detect_with_tracking(gray, mode, hints_json)
 
     min_confidence = 0.18 if mode == "upload" else 0.16
-    if candidate is None or float(candidate["confidence"]) < min_confidence:
+    if candidate is None or (mode != "camera" and float(candidate["confidence"]) < min_confidence):
         return json.dumps({
             "found": False,
             "confidence": 0.0 if candidate is None else round(float(candidate.get("confidence", 0.0)), 4),

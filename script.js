@@ -451,6 +451,18 @@ function sampleToAnalysisCanvas(source, mode, forcedMaxDimension = null) {
 	return context.getImageData(0, 0, frameWidth, frameHeight);
 }
 
+function sampleCanvasToImageData(sourceCanvas, maxDimension = 1280) {
+	const scale = Math.min(1, maxDimension / Math.max(sourceCanvas.width, sourceCanvas.height));
+	const width = Math.max(1, Math.round(sourceCanvas.width * scale));
+	const height = Math.max(1, Math.round(sourceCanvas.height * scale));
+
+	refs.analysisCanvas.width = width;
+	refs.analysisCanvas.height = height;
+	const context = refs.analysisCanvas.getContext("2d", { willReadFrequently: true });
+	context.drawImage(sourceCanvas, 0, 0, width, height);
+	return context.getImageData(0, 0, width, height);
+}
+
 function setupDetectorWorker() {
 	if (state.worker) {
 		return;
@@ -662,7 +674,7 @@ function resetCameraTracking() {
 	state.lastCameraResult = null;
 	state.lastCameraDetectionAt = 0;
 	state.lastDetectionDurationMs = 0;
-	state.cameraDetectionInterval = 135;
+	state.cameraDetectionInterval = 95;
 	state.missingContourFrames = 0;
 }
 
@@ -906,6 +918,20 @@ async function captureAndCropFromCamera() {
 			}
 		}
 
+		if (!usedCrop && state.workerReady) {
+			const stillImageData = sampleCanvasToImageData(fullCanvas, 1400);
+			const stillResult = await detectDocument(stillImageData, "upload");
+			if (stillResult?.found && Array.isArray(stillResult.corners) && stillResult.corners.length === 4) {
+				const sx = fullCanvas.width / stillResult.frame_width;
+				const sy = fullCanvas.height / stillResult.frame_height;
+				const stillCorners = stillResult.corners.map(([x, y]) => [x * sx, y * sy]);
+				if (isValidDocumentDetection(stillCorners, fullCanvas.width, fullCanvas.height)) {
+					outputCanvas = cropPerspectiveFromCorners(fullCanvas, stillCorners);
+					usedCrop = true;
+				}
+			}
+		}
+
 		const dataUrl = outputCanvas.toDataURL("image/jpeg", 0.94);
 		await closeFullscreenScanner();
 		setMode("upload");
@@ -938,7 +964,7 @@ async function performCameraDetection() {
 	const startedAt = performance.now();
 
 	try {
-		const imageData = sampleToAnalysisCanvas(surface.preview, "camera", 480);
+		const imageData = sampleToAnalysisCanvas(surface.preview, "camera", 430);
 		const workerHints = getWorkerHints("camera", imageData);
 		const result = await detectDocument(imageData, "camera", workerHints);
 
@@ -984,7 +1010,7 @@ async function performCameraDetection() {
 		setConfidence("-");
 	} finally {
 		state.lastDetectionDurationMs = performance.now() - startedAt;
-		state.cameraDetectionInterval = Math.min(260, Math.max(100, state.lastDetectionDurationMs * 1.2));
+		state.cameraDetectionInterval = Math.min(170, Math.max(65, state.lastDetectionDurationMs * 0.95));
 		state.detectionInFlight = false;
 	}
 }
