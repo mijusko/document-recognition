@@ -116,21 +116,30 @@ def _score_quad(points, frame_w, frame_h, min_area_ratio, edge_map):
     }
 
 
-def _candidate_from_contours(contours, frame_w, frame_h, min_area_ratio, edge_map):
-    tolerances = sorted({
-        1.8,
-        3.0,
-        4.5,
-        6.0,
-        8.0,
-        10.0,
-        13.0,
-        round(max(frame_w, frame_h) * 0.02, 2),
-        round(max(frame_w, frame_h) * 0.03, 2),
-    })
+def _candidate_from_contours(
+    contours,
+    frame_w,
+    frame_h,
+    min_area_ratio,
+    edge_map,
+    max_candidates=70,
+    tolerances=None,
+):
+    if tolerances is None:
+        tolerances = sorted({
+            1.8,
+            3.0,
+            4.5,
+            6.0,
+            8.0,
+            10.0,
+            13.0,
+            round(max(frame_w, frame_h) * 0.02, 2),
+            round(max(frame_w, frame_h) * 0.03, 2),
+        })
 
     best = None
-    for contour in sorted(contours, key=lambda item: item.shape[0], reverse=True)[:70]:
+    for contour in sorted(contours, key=lambda item: item.shape[0], reverse=True)[:max_candidates]:
         if contour.shape[0] < 35:
             continue
 
@@ -232,11 +241,41 @@ def _candidate_from_hough(edge_mask, frame_w, frame_h, min_area_ratio):
     return best
 
 
-def _detect_quad(gray, orig_w, orig_h, mode):
-    frame_h, frame_w = gray.shape
-    min_area_ratio = 0.07 if mode == "upload" else 0.09
+def _expand_quad(quad, scale, frame_w, frame_h):
+    center = np.mean(quad, axis=0)
+    expanded = center + ((quad - center) * scale)
+    expanded[:, 0] = np.clip(expanded[:, 0], 0, frame_w - 1)
+    expanded[:, 1] = np.clip(expanded[:, 1], 0, frame_h - 1)
+    return expanded
 
-    stride = 2 if mode == "camera" and max(frame_w, frame_h) >= 400 else 1
+
+def _get_tracking_roi(gray, prev_corners):
+    frame_h, frame_w = gray.shape
+    quad = np.asarray(prev_corners, dtype=float)
+    if quad.shape != (4, 2):
+        return None
+
+    quad[:, 0] = np.clip(quad[:, 0], 0, frame_w - 1)
+    quad[:, 1] = np.clip(quad[:, 1], 0, frame_h - 1)
+    expanded = _expand_quad(quad, 1.32, frame_w, frame_h)
+
+    min_x = int(max(0, np.floor(np.min(expanded[:, 0]))))
+    max_x = int(min(frame_w, np.ceil(np.max(expanded[:, 0])) + 1))
+    min_y = int(max(0, np.floor(np.min(expanded[:, 1]))))
+    max_y = int(min(frame_h, np.ceil(np.max(expanded[:, 1])) + 1))
+
+    if (max_x - min_x) < 70 or (max_y - min_y) < 70:
+        return None
+
+    roi = gray[min_y:max_y, min_x:max_x]
+    return roi, min_x, min_y
+
+
+def _detect_quad(gray, mode, tracked=False):
+    frame_h, frame_w = gray.shape
+    min_area_ratio = 0.07 if mode == "upload" else (0.08 if tracked else 0.09)
+
+    stride = 1 if tracked else (2 if mode == "camera" and max(frame_w, frame_h) >= 400 else 1)
     if stride > 1:
         work_gray = gray[::stride, ::stride]
         work_h, work_w = work_gray.shape
@@ -266,6 +305,9 @@ def _detect_quad(gray, orig_w, orig_h, mode):
     best = None
     strongest_edges = None
     strongest_density = 0.0
+
+    contour_budget = 36 if tracked else 70
+    tracked_tolerances = [1.8, 3.0, 4.5, 6.0, 8.0] if tracked else None
 
     for variant in variants:
         gradient = filters.scharr(variant)
@@ -297,6 +339,8 @@ def _detect_quad(gray, orig_w, orig_h, mode):
             work_h,
             min_area_ratio,
             support,
+            max_candidates=contour_budget,
+            tolerances=tracked_tolerances,
         )
         if candidate is not None and (best is None or candidate["confidence"] > best["confidence"]):
             best = candidate
@@ -316,6 +360,8 @@ def _detect_quad(gray, orig_w, orig_h, mode):
                 work_h,
                 min_area_ratio,
                 support2,
+                max_candidates=contour_budget,
+                tolerances=tracked_tolerances,
             )
             if candidate2 is not None and (best is None or candidate2["confidence"] > best["confidence"]):
                 best = candidate2
@@ -331,13 +377,34 @@ def _detect_quad(gray, orig_w, orig_h, mode):
     return best
 
 
-def detect_document_json(pixels, width, height, mode="upload"):
+def detect_document_json(pixels, width, height, mode="upload", hints_json=""):
     image = np.asarray(pixels, dtype=np.uint8).reshape((height, width, 4))
     rgb = image[..., :3].astype(np.float32) / 255.0
     gray = color.rgb2gray(rgb)
     gray = exposure.rescale_intensity(gray, in_range="image", out_range=(0.0, 1.0))
 
-    candidate = _detect_quad(gray, width, height, mode)
+    hints = {}
+    if hints_json:
+        try:
+            hints = json.loads(hints_json)
+        except Exception:
+            hints = {}
+
+    candidate = None
+    if mode == "camera" and isinstance(hints, dict):
+        prev_corners = hints.get("prev_corners")
+        if isinstance(prev_corners, list) and len(prev_corners) == 4:
+            roi_data = _get_tracking_roi(gray, prev_corners)
+            if roi_data is not None:
+                roi_gray, offset_x, offset_y = roi_data
+                candidate = _detect_quad(roi_gray, mode, tracked=True)
+                if candidate is not None:
+                    candidate["corners"][:, 0] += float(offset_x)
+                    candidate["corners"][:, 1] += float(offset_y)
+
+    if candidate is None:
+        candidate = _detect_quad(gray, mode, tracked=False)
+
     min_confidence = 0.34 if mode == "upload" else 0.4
 
     if candidate is None or candidate["confidence"] < min_confidence:
@@ -413,7 +480,8 @@ self.onmessage = async (event) => {
 		}
 
 		const pixels = new Uint8ClampedArray(message.pixels);
-		const rawResult = detector(pixels, message.width, message.height, message.mode || "upload");
+        const hintsJson = message.hints ? JSON.stringify(message.hints) : "";
+        const rawResult = detector(pixels, message.width, message.height, message.mode || "upload", hintsJson);
 		const jsonText = typeof rawResult === "string" ? rawResult : rawResult.toString();
 		if (rawResult && typeof rawResult.destroy === "function") {
 			rawResult.destroy();

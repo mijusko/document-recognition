@@ -513,7 +513,32 @@ function setupDetectorWorker() {
 	};
 }
 
-function requestWorkerDetection(imageData, mode) {
+function getWorkerHints(mode, imageData) {
+	if (mode !== "camera") {
+		return null;
+	}
+
+	const previous = state.lastCameraResult;
+	if (!previous?.found || !Array.isArray(previous.corners) || previous.corners.length !== 4) {
+		return null;
+	}
+
+	const prevFrameW = Number(previous.frame_width || 0);
+	const prevFrameH = Number(previous.frame_height || 0);
+	if (!prevFrameW || !prevFrameH) {
+		return null;
+	}
+
+	const scaleX = imageData.width / prevFrameW;
+	const scaleY = imageData.height / prevFrameH;
+	const prevCorners = previous.corners.map(([x, y]) => [x * scaleX, y * scaleY]);
+
+	return {
+		prev_corners: prevCorners,
+	};
+}
+
+function requestWorkerDetection(imageData, mode, hints = null) {
 	if (!state.workerReady || !state.worker) {
 		return Promise.resolve(null);
 	}
@@ -534,6 +559,7 @@ function requestWorkerDetection(imageData, mode) {
 			type: "detect",
 			id,
 			mode,
+			hints,
 			width: imageData.width,
 			height: imageData.height,
 			pixels,
@@ -541,8 +567,8 @@ function requestWorkerDetection(imageData, mode) {
 	});
 }
 
-async function detectDocument(imageData, mode) {
-	const result = await requestWorkerDetection(imageData, mode);
+async function detectDocument(imageData, mode, hints = null) {
+	const result = await requestWorkerDetection(imageData, mode, hints);
 	if (!result) {
 		return null;
 	}
@@ -913,7 +939,8 @@ async function performCameraDetection() {
 
 	try {
 		const imageData = sampleToAnalysisCanvas(surface.preview, "camera", 480);
-		const result = await detectDocument(imageData, "camera");
+		const workerHints = getWorkerHints("camera", imageData);
+		const result = await detectDocument(imageData, "camera", workerHints);
 
 		if (result?.found) {
 			const smoothedCorners = smoothCameraCorners(result.corners, result.frame_width, result.frame_height);
