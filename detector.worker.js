@@ -238,10 +238,12 @@ def _detect_quad(gray, mode):
 
     blur_sigma = 1.1 if mode == "camera" else 1.25
     base = filters.gaussian(gray, sigma=blur_sigma, preserve_range=True)
+    
     variants = [
         exposure.equalize_adapthist(base, clip_limit=0.018 if mode == "camera" else 0.016),
-        exposure.adjust_sigmoid(base, cutoff=0.5, gain=9),
     ]
+    if mode != "camera":
+        variants.append(exposure.adjust_sigmoid(base, cutoff=0.5, gain=9))
 
     best = None
     strongest_edges = None
@@ -300,7 +302,7 @@ def _detect_quad(gray, mode):
             if candidate2 is not None and (best is None or candidate2["confidence"] > best["confidence"]):
                 best = candidate2
 
-    if (best is None or best["confidence"] < 0.5) and strongest_edges is not None:
+    if mode != "camera" and (best is None or best["confidence"] < 0.5) and strongest_edges is not None:
         hough_candidate = _candidate_from_hough(strongest_edges, frame_w, frame_h, min_area_ratio)
         if hough_candidate is not None and (best is None or hough_candidate["confidence"] > best["confidence"]):
             best = hough_candidate

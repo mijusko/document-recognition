@@ -912,7 +912,7 @@ async function performCameraDetection() {
 	const startedAt = performance.now();
 
 	try {
-		const imageData = sampleToAnalysisCanvas(surface.preview, "camera", 620);
+		const imageData = sampleToAnalysisCanvas(surface.preview, "camera", 480);
 		const result = await detectDocument(imageData, "camera");
 
 		if (result?.found) {
