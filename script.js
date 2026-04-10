@@ -328,7 +328,7 @@ async function initScanner() {
   setSdkState("Ucitavam OpenCV i photoscan.js...");
   await waitForPhotoScan();
   await waitForOpenCv();
-  state.scanner = new window.PhotoScan();
+  state.scanner = window.MiniScanbot.create();
   state.engineReady = true;
   setSdkState("Engine spreman");
 }
