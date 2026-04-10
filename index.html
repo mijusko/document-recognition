@@ -63,9 +63,9 @@
 					</div>
 
 					<div class="mode-pane is-hidden" id="cameraPane">
-						<button id="cameraToggle" class="camera-button" type="button">Pokreni kameru</button>
+						<button id="cameraToggle" class="camera-button" type="button">Otvori full-screen kameru</button>
 						<p class="helper-text" id="cameraHint">
-							Kamera radi na localhost ili https adresi. Najbolji rezultat je kada je list ceo u kadru i bez jakih senki.
+							Kamera se otvara preko celog ekrana i u realnom vremenu detektuje papir. Kada slikas, dokument se odmah kropuje.
 						</p>
 					</div>
 
@@ -148,6 +148,18 @@
 		</main>
 
 		<canvas id="analysisCanvas" hidden></canvas>
+
+		<div class="fullscreen-scanner is-hidden" id="fullscreenScanner" aria-hidden="true">
+			<div class="fullscreen-scanner__frame" id="fsCameraFrame">
+				<video id="fsCameraPreview" autoplay playsinline muted></video>
+				<canvas id="fsCameraOverlay" aria-hidden="true"></canvas>
+				<div class="fullscreen-scanner__hud">
+					<button id="fsCloseBtn" class="fs-icon-button" type="button">Zatvori</button>
+					<p id="fsStatus" class="fs-status">Trazi dokument u kadru...</p>
+					<button id="fsCaptureBtn" class="fs-capture-button" type="button" aria-label="Slikaj dokument"></button>
+				</div>
+			</div>
+		</div>
 	</div>
 
 	<script type="module" src="./script.js"></script>

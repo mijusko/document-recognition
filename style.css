@@ -428,6 +428,102 @@ input {
 	border: 1px solid rgba(19, 111, 99, 0.12);
 }
 
+.fullscreen-scanner {
+	position: fixed;
+	inset: 0;
+	z-index: 999;
+	background: rgba(5, 8, 10, 0.96);
+}
+
+.fullscreen-scanner.is-hidden {
+	display: none;
+}
+
+.fullscreen-scanner__frame {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+}
+
+#fsCameraPreview,
+#fsCameraOverlay {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	background: #000;
+}
+
+#fsCameraOverlay {
+	pointer-events: none;
+}
+
+.fullscreen-scanner__hud {
+	position: absolute;
+	inset: 0;
+	display: grid;
+	grid-template-rows: auto 1fr auto;
+	align-items: start;
+	padding: 18px;
+	pointer-events: none;
+}
+
+.fs-icon-button,
+.fs-capture-button,
+.fs-status {
+	pointer-events: auto;
+}
+
+.fs-icon-button {
+	justify-self: start;
+	border: 1px solid rgba(255, 255, 255, 0.25);
+	background: rgba(0, 0, 0, 0.45);
+	color: #f8fbff;
+	padding: 10px 16px;
+	border-radius: 999px;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+.fs-status {
+	justify-self: center;
+	align-self: start;
+	margin-top: 12px;
+	padding: 10px 16px;
+	border-radius: 999px;
+	background: rgba(0, 0, 0, 0.44);
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	color: #f2f5f8;
+	font-size: 0.92rem;
+	font-weight: 700;
+	text-align: center;
+}
+
+.fs-capture-button {
+	justify-self: center;
+	align-self: end;
+	margin-bottom: 20px;
+	width: 92px;
+	height: 92px;
+	border-radius: 50%;
+	border: 5px solid rgba(255, 255, 255, 0.95);
+	background: rgba(255, 255, 255, 0.9);
+	box-shadow: 0 0 0 10px rgba(0, 0, 0, 0.35);
+	cursor: pointer;
+	transition: transform 120ms ease, opacity 120ms ease;
+}
+
+.fs-capture-button:active {
+	transform: scale(0.97);
+}
+
+.fs-capture-button[disabled] {
+	opacity: 0.55;
+	cursor: wait;
+}
+
 @keyframes pulse {
 	0% {
 		box-shadow: 0 0 0 0 rgba(19, 111, 99, 0.42);
@@ -478,5 +574,19 @@ input {
 
 	.hero h1 {
 		line-height: 1.02;
+	}
+
+	.fullscreen-scanner__hud {
+		padding: 12px;
+	}
+
+	.fs-status {
+		font-size: 0.84rem;
+		padding: 8px 12px;
+	}
+
+	.fs-capture-button {
+		width: 82px;
+		height: 82px;
 	}
 }

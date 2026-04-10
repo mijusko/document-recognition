@@ -20,6 +20,9 @@ const state = {
 	uploadImageLoaded: false,
 	missingContourFrames: 0,
 	maxMissingContourFrames: 12,
+	fullscreenOpen: false,
+	captureInFlight: false,
+	closingFullscreen: false,
 };
 
 const refs = {
@@ -49,6 +52,13 @@ const refs = {
 	modeButtons: [...document.querySelectorAll(".mode-button")],
 	uploadPane: document.querySelector("#uploadPane"),
 	cameraPane: document.querySelector("#cameraPane"),
+	fullscreenScanner: document.querySelector("#fullscreenScanner"),
+	fsCameraFrame: document.querySelector("#fsCameraFrame"),
+	fsCameraPreview: document.querySelector("#fsCameraPreview"),
+	fsCameraOverlay: document.querySelector("#fsCameraOverlay"),
+	fsCloseBtn: document.querySelector("#fsCloseBtn"),
+	fsCaptureBtn: document.querySelector("#fsCaptureBtn"),
+	fsStatus: document.querySelector("#fsStatus"),
 };
 
 function setEngineState(message) {
@@ -57,6 +67,9 @@ function setEngineState(message) {
 
 function setDetectionState(message) {
 	refs.detectionState.textContent = message;
+	if (refs.fsStatus) {
+		refs.fsStatus.textContent = message;
+	}
 }
 
 function setConfidence(value) {
@@ -71,8 +84,8 @@ function setInsightValues({ mode, frameWidth, frameHeight, corners, areaRatio })
 }
 
 function setMode(mode) {
-	if (mode === "upload" && state.cameraStream) {
-		stopCamera();
+	if (mode === "upload" && state.fullscreenOpen) {
+		void closeFullscreenScanner();
 	}
 
 	state.activeMode = mode;
@@ -106,12 +119,8 @@ function setMode(mode) {
 		areaRatio: state.lastCameraResult?.area_ratio,
 	});
 
-	if (!state.cameraStream) {
-		setDetectionState("Ukljuci kameru za live detekciju");
-		setConfidence("-");
-	}
-
-	redrawCameraOverlay();
+	setDetectionState("Klikni na dugme za full-screen kameru");
+	setConfidence("-");
 }
 
 function getContainRect(sourceWidth, sourceHeight, containerWidth, containerHeight) {
@@ -206,22 +215,38 @@ function redrawUploadOverlay() {
 }
 
 function redrawCameraOverlay({ hold = false } = {}) {
+	const surface = getActiveCameraSurface();
 	const result = state.lastCameraResult;
 	if (!result?.corners?.length) {
-		const canvas = refs.cameraOverlay;
-		const { context } = setupCanvasForFrame(canvas, refs.cameraFrame);
-		context.clearRect(0, 0, canvas.width, canvas.height);
+		const { context } = setupCanvasForFrame(surface.overlay, surface.frame);
+		context.clearRect(0, 0, surface.overlay.width, surface.overlay.height);
 		return;
 	}
 
 	drawCorners({
-		canvas: refs.cameraOverlay,
-		frame: refs.cameraFrame,
+		canvas: surface.overlay,
+		frame: surface.frame,
 		frameWidth: result.frame_width,
 		frameHeight: result.frame_height,
 		corners: result.corners,
 		hold,
 	});
+}
+
+function getActiveCameraSurface() {
+	if (state.fullscreenOpen) {
+		return {
+			preview: refs.fsCameraPreview,
+			overlay: refs.fsCameraOverlay,
+			frame: refs.fsCameraFrame,
+		};
+	}
+
+	return {
+		preview: refs.cameraPreview,
+		overlay: refs.cameraOverlay,
+		frame: refs.cameraFrame,
+	};
 }
 
 function normalizeCorners(corners) {
@@ -615,9 +640,64 @@ function resetCameraTracking() {
 	state.missingContourFrames = 0;
 }
 
+function setCaptureButtonBusy(isBusy) {
+	if (refs.fsCaptureBtn) {
+		refs.fsCaptureBtn.disabled = isBusy;
+	}
+}
+
+async function openFullscreenScanner() {
+	if (state.fullscreenOpen) {
+		return;
+	}
+
+	state.fullscreenOpen = true;
+	refs.fullscreenScanner.classList.remove("is-hidden");
+	refs.fullscreenScanner.setAttribute("aria-hidden", "false");
+	document.body.style.overflow = "hidden";
+	setDetectionState("Pokrecem full-screen kameru...");
+	setCaptureButtonBusy(false);
+
+	if (refs.fullscreenScanner.requestFullscreen && !document.fullscreenElement) {
+		try {
+			await refs.fullscreenScanner.requestFullscreen();
+		} catch {
+			// Fullscreen API may be blocked by browser policy.
+		}
+	}
+
+	await startCamera();
+}
+
+async function closeFullscreenScanner({ skipExitFullscreen = false } = {}) {
+	if (!state.fullscreenOpen) {
+		return;
+	}
+
+	state.closingFullscreen = true;
+	stopCamera();
+	state.fullscreenOpen = false;
+	refs.fullscreenScanner.classList.add("is-hidden");
+	refs.fullscreenScanner.setAttribute("aria-hidden", "true");
+	document.body.style.overflow = "";
+
+	if (!skipExitFullscreen && document.fullscreenElement && document.exitFullscreen) {
+		try {
+			await document.exitFullscreen();
+		} catch {
+			// Ignore exit fullscreen failures.
+		}
+	}
+
+	state.closingFullscreen = false;
+	setDetectionState("Klikni na dugme za full-screen kameru");
+	setConfidence("-");
+}
+
 async function startCamera() {
 	if (!navigator.mediaDevices?.getUserMedia) {
 		refs.cameraHint.textContent = "Ovaj browser ne podrzava pristup kameri.";
+		setDetectionState("Ovaj browser ne podrzava kameru");
 		return;
 	}
 
@@ -633,14 +713,15 @@ async function startCamera() {
 
 		state.cameraStream = stream;
 		resetCameraTracking();
-		refs.cameraPreview.srcObject = stream;
-		refs.cameraPreview.classList.remove("is-hidden");
+		const surface = getActiveCameraSurface();
+		surface.preview.srcObject = stream;
+		surface.preview.classList.remove("is-hidden");
 		refs.cameraPlaceholder.style.display = "none";
-		refs.cameraToggle.textContent = "Zaustavi kameru";
-		refs.cameraHint.textContent = "Kamera je aktivna. Drzi dokument ceo u kadru za najbolji rezultat.";
+		refs.cameraHint.textContent = "Kamera je aktivna preko celog ekrana.";
 
-		await refs.cameraPreview.play();
+		await surface.preview.play();
 		if (state.workerReady) {
+			setDetectionState("Trazi dokument u live kadru");
 			startCameraLoop();
 		} else {
 			setDetectionState("Kamera radi, Python worker se jos ucitava");
@@ -648,6 +729,7 @@ async function startCamera() {
 	} catch (error) {
 		console.error(error);
 		refs.cameraHint.textContent = "Pristup kameri nije dozvoljen ili nije dostupan na ovoj adresi.";
+		setDetectionState("Pristup kameri nije dozvoljen");
 	}
 }
 
@@ -666,24 +748,163 @@ function stopCamera() {
 	refs.cameraPreview.pause();
 	refs.cameraPreview.srcObject = null;
 	refs.cameraPreview.classList.add("is-hidden");
+	refs.fsCameraPreview.pause();
+	refs.fsCameraPreview.srcObject = null;
+	refs.fsCameraPreview.classList.add("is-hidden");
 	refs.cameraPlaceholder.style.display = "grid";
-	refs.cameraToggle.textContent = "Pokreni kameru";
 	refs.cameraHint.textContent = "Kamera radi na localhost ili https adresi. Najbolji rezultat je kada je list ceo u kadru i bez jakih senki.";
 	redrawCameraOverlay();
+}
 
-	if (state.activeMode === "camera") {
-		setDetectionState("Kamera je zaustavljena");
-		setConfidence("-");
-		setInsightValues({ mode: "camera" });
+function bilinearSample(data, width, height, x, y, channel) {
+	const x0 = Math.max(0, Math.min(width - 1, Math.floor(x)));
+	const y0 = Math.max(0, Math.min(height - 1, Math.floor(y)));
+	const x1 = Math.max(0, Math.min(width - 1, x0 + 1));
+	const y1 = Math.max(0, Math.min(height - 1, y0 + 1));
+	const fx = x - x0;
+	const fy = y - y0;
+
+	const idx00 = ((y0 * width) + x0) * 4 + channel;
+	const idx10 = ((y0 * width) + x1) * 4 + channel;
+	const idx01 = ((y1 * width) + x0) * 4 + channel;
+	const idx11 = ((y1 * width) + x1) * 4 + channel;
+
+	const v00 = data[idx00];
+	const v10 = data[idx10];
+	const v01 = data[idx01];
+	const v11 = data[idx11];
+
+	const top = v00 + ((v10 - v00) * fx);
+	const bottom = v01 + ((v11 - v01) * fx);
+	return top + ((bottom - top) * fy);
+}
+
+function cropPerspectiveFromCorners(srcCanvas, corners) {
+	const [tl, tr, br, bl] = normalizeCorners(corners);
+	const topWidth = Math.hypot(tr[0] - tl[0], tr[1] - tl[1]);
+	const bottomWidth = Math.hypot(br[0] - bl[0], br[1] - bl[1]);
+	const leftHeight = Math.hypot(bl[0] - tl[0], bl[1] - tl[1]);
+	const rightHeight = Math.hypot(br[0] - tr[0], br[1] - tr[1]);
+
+	const dstWidth = Math.max(1, Math.round(Math.max(topWidth, bottomWidth)));
+	const dstHeight = Math.max(1, Math.round(Math.max(leftHeight, rightHeight)));
+
+	const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true });
+	const srcImageData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
+	const src = srcImageData.data;
+
+	const outCanvas = document.createElement("canvas");
+	outCanvas.width = dstWidth;
+	outCanvas.height = dstHeight;
+	const outCtx = outCanvas.getContext("2d");
+	const outImageData = outCtx.createImageData(dstWidth, dstHeight);
+	const out = outImageData.data;
+
+	for (let y = 0; y < dstHeight; y += 1) {
+		const v = dstHeight <= 1 ? 0 : y / (dstHeight - 1);
+		for (let x = 0; x < dstWidth; x += 1) {
+			const u = dstWidth <= 1 ? 0 : x / (dstWidth - 1);
+			const sx =
+				((1 - u) * (1 - v) * tl[0])
+				+ (u * (1 - v) * tr[0])
+				+ (u * v * br[0])
+				+ ((1 - u) * v * bl[0]);
+			const sy =
+				((1 - u) * (1 - v) * tl[1])
+				+ (u * (1 - v) * tr[1])
+				+ (u * v * br[1])
+				+ ((1 - u) * v * bl[1]);
+
+			const idx = ((y * dstWidth) + x) * 4;
+			out[idx] = bilinearSample(src, srcCanvas.width, srcCanvas.height, sx, sy, 0);
+			out[idx + 1] = bilinearSample(src, srcCanvas.width, srcCanvas.height, sx, sy, 1);
+			out[idx + 2] = bilinearSample(src, srcCanvas.width, srcCanvas.height, sx, sy, 2);
+			out[idx + 3] = 255;
+		}
+	}
+
+	outCtx.putImageData(outImageData, 0, 0);
+	return outCanvas;
+}
+
+function applyCapturedDataUrl(dataUrl, metadataLabel) {
+	if (state.uploadObjectUrl) {
+		URL.revokeObjectURL(state.uploadObjectUrl);
+		state.uploadObjectUrl = null;
+	}
+
+	state.uploadImageLoaded = false;
+	state.lastUploadResult = null;
+	refs.fileMeta.textContent = metadataLabel;
+	refs.uploadPlaceholder.style.display = "none";
+	refs.uploadPreview.classList.add("is-visible");
+	refs.uploadPreview.onload = () => {
+		state.uploadImageLoaded = true;
+		void processUploadImage();
+	};
+	refs.uploadPreview.src = dataUrl;
+}
+
+async function captureAndCropFromCamera() {
+	if (!state.cameraStream || state.captureInFlight) {
+		return;
+	}
+
+	const surface = getActiveCameraSurface();
+	const video = surface.preview;
+	if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) {
+		return;
+	}
+
+	state.captureInFlight = true;
+	setCaptureButtonBusy(true);
+	setDetectionState("Slikam i kropujem dokument...");
+
+	try {
+		const fullCanvas = document.createElement("canvas");
+		fullCanvas.width = video.videoWidth;
+		fullCanvas.height = video.videoHeight;
+		fullCanvas.getContext("2d").drawImage(video, 0, 0, fullCanvas.width, fullCanvas.height);
+
+		let outputCanvas = fullCanvas;
+		let usedCrop = false;
+
+		if (state.lastCameraResult?.found && Array.isArray(state.lastCameraResult.corners) && state.lastCameraResult.corners.length === 4) {
+			const scaleX = fullCanvas.width / state.lastCameraResult.frame_width;
+			const scaleY = fullCanvas.height / state.lastCameraResult.frame_height;
+			const cornersInVideo = state.lastCameraResult.corners.map(([x, y]) => [x * scaleX, y * scaleY]);
+
+			if (isValidDocumentDetection(cornersInVideo, fullCanvas.width, fullCanvas.height)) {
+				outputCanvas = cropPerspectiveFromCorners(fullCanvas, cornersInVideo);
+				usedCrop = true;
+			}
+		}
+
+		const dataUrl = outputCanvas.toDataURL("image/jpeg", 0.94);
+		await closeFullscreenScanner();
+		setMode("upload");
+		applyCapturedDataUrl(
+			dataUrl,
+			usedCrop
+				? `Snimak sa kamere • automatski kropovan • ${outputCanvas.width}x${outputCanvas.height}`
+				: `Snimak sa kamere • bez kropljenja • ${outputCanvas.width}x${outputCanvas.height}`,
+		);
+	} catch (error) {
+		console.error(error);
+		setDetectionState("Greska tokom slikanja i kropljenja");
+	} finally {
+		state.captureInFlight = false;
+		setCaptureButtonBusy(false);
 	}
 }
 
 async function performCameraDetection() {
-	if (!state.cameraStream || !state.workerReady || state.detectionInFlight) {
+	if (!state.fullscreenOpen || !state.cameraStream || !state.workerReady || state.detectionInFlight) {
 		return;
 	}
 
-	if (refs.cameraPreview.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+	const surface = getActiveCameraSurface();
+	if (surface.preview.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
 		return;
 	}
 
@@ -691,7 +912,7 @@ async function performCameraDetection() {
 	const startedAt = performance.now();
 
 	try {
-		const imageData = sampleToAnalysisCanvas(refs.cameraPreview, "camera", 620);
+		const imageData = sampleToAnalysisCanvas(surface.preview, "camera", 620);
 		const result = await detectDocument(imageData, "camera");
 
 		if (result?.found) {
@@ -748,7 +969,7 @@ function startCameraLoop() {
 
 	const loop = (timestamp) => {
 		state.cameraLoopId = requestAnimationFrame(loop);
-		if (!state.cameraStream) {
+		if (!state.cameraStream || !state.fullscreenOpen) {
 			return;
 		}
 
@@ -774,11 +995,28 @@ function bindEvents() {
 	});
 
 	refs.cameraToggle.addEventListener("click", async () => {
-		if (state.cameraStream) {
-			stopCamera();
+		if (state.activeMode !== "camera") {
+			setMode("camera");
+		}
+		await openFullscreenScanner();
+	});
+
+	refs.fsCloseBtn.addEventListener("click", async () => {
+		await closeFullscreenScanner();
+	});
+
+	refs.fsCaptureBtn.addEventListener("click", async () => {
+		await captureAndCropFromCamera();
+	});
+
+	document.addEventListener("fullscreenchange", () => {
+		if (!state.fullscreenOpen || state.closingFullscreen) {
 			return;
 		}
-		await startCamera();
+
+		if (!document.fullscreenElement) {
+			void closeFullscreenScanner({ skipExitFullscreen: true });
+		}
 	});
 
 	window.addEventListener("resize", () => {
