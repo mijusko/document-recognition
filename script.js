@@ -6,10 +6,15 @@ const state = {
   frameCanvas: null,
   frameCtx: null,
   runningDetection: false,
+  cropInFlight: false,
   lastDetectionAt: 0,
-  detectionEveryMs: 130,
+  detectionEveryMs: 85,
   stableFrames: 0,
+  requiredStableFrames: 3,
   cooldownUntil: 0,
+  framesWithoutDetection: 0,
+  overlayHoldFrames: 4,
+  cornerSmoothing: 0.34,
   lastUploadCorners: null,
   lastCameraCorners: null,
 };
@@ -109,6 +114,37 @@ function cornersToArray(corners) {
   return valid ? points : null;
 }
 
+function cloneCorners(corners) {
+  if (!corners) {
+    return null;
+  }
+
+  return {
+    topLeft: { x: corners.topLeft.x, y: corners.topLeft.y },
+    topRight: { x: corners.topRight.x, y: corners.topRight.y },
+    bottomRight: { x: corners.bottomRight.x, y: corners.bottomRight.y },
+    bottomLeft: { x: corners.bottomLeft.x, y: corners.bottomLeft.y },
+  };
+}
+
+function blendCorners(previous, current, alpha) {
+  if (!previous) {
+    return cloneCorners(current);
+  }
+
+  const mixPoint = (prev, next) => ({
+    x: (prev.x * (1 - alpha)) + (next.x * alpha),
+    y: (prev.y * (1 - alpha)) + (next.y * alpha),
+  });
+
+  return {
+    topLeft: mixPoint(previous.topLeft, current.topLeft),
+    topRight: mixPoint(previous.topRight, current.topRight),
+    bottomRight: mixPoint(previous.bottomRight, current.bottomRight),
+    bottomLeft: mixPoint(previous.bottomLeft, current.bottomLeft),
+  };
+}
+
 function getSourceDimensions(source) {
   const width = source?.videoWidth || source?.naturalWidth || source?.width || 0;
   const height = source?.videoHeight || source?.naturalHeight || source?.height || 0;
@@ -118,45 +154,6 @@ function getSourceDimensions(source) {
   }
 
   return { width, height };
-}
-
-function getContourMetrics(corners, sourceWidth, sourceHeight) {
-  const points = cornersToArray(corners);
-  if (!points || !sourceWidth || !sourceHeight) {
-    return null;
-  }
-
-  const topWidth = pointDistance(corners.topLeft, corners.topRight);
-  const bottomWidth = pointDistance(corners.bottomLeft, corners.bottomRight);
-  const leftHeight = pointDistance(corners.topLeft, corners.bottomLeft);
-  const rightHeight = pointDistance(corners.topRight, corners.bottomRight);
-
-  const width = Math.max(topWidth, bottomWidth);
-  const height = Math.max(leftHeight, rightHeight);
-  const shorter = Math.max(1, Math.min(width, height));
-  const longer = Math.max(width, height);
-
-  return {
-    areaRatio: polygonArea(points) / (sourceWidth * sourceHeight),
-    longShortRatio: longer / shorter,
-  };
-}
-
-function isLikelyReceiptContour(metrics) {
-  if (!metrics) {
-    return false;
-  }
-
-  // QR region is usually a small, near-square contour; receipts are larger and elongated.
-  if (metrics.areaRatio < 0.085) {
-    return false;
-  }
-
-  if (metrics.longShortRatio < 1.18) {
-    return false;
-  }
-
-  return true;
 }
 
 function drawPolygon({ canvas, container, sourceWidth, sourceHeight, corners }) {
@@ -176,7 +173,7 @@ function drawPolygon({ canvas, container, sourceWidth, sourceHeight, corners }) 
   setup.context.lineCap = "round";
   setup.context.lineWidth = 4;
   setup.context.strokeStyle = "rgba(115, 255, 215, 0.96)";
-  setup.context.fillStyle = "rgba(115, 255, 215, 0.16)";
+  setup.context.fillStyle = "rgba(115, 255, 215, 0.14)";
   setup.context.shadowColor = "rgba(115, 255, 215, 0.42)";
   setup.context.shadowBlur = 16;
 
@@ -247,69 +244,18 @@ function drawCameraOverlay() {
   });
 }
 
-function waitForPhotoScan(timeoutMs = 12000) {
+function waitForMiniScanbot(timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
-    const start = Date.now();
+    const startedAt = Date.now();
+
     const check = () => {
-      if (typeof window.PhotoScan === "function") {
+      if (typeof window.MiniScanbot === "function") {
         resolve();
         return;
       }
 
-      if (Date.now() - start >= timeoutMs) {
-        reject(new Error("photoscan.js nije ucitan."));
-        return;
-      }
-
-      window.setTimeout(check, 50);
-    };
-
-    check();
-  });
-}
-
-function waitForOpenCv(timeoutMs = 20000) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    let finished = false;
-    let runtimeHooked = false;
-
-    const done = (error) => {
-      if (finished) {
-        return;
-      }
-      finished = true;
-      if (error) {
-        reject(error);
-      } else {
-        resolve();
-      }
-    };
-
-    const hookRuntimeInit = () => {
-      if (!window.cv || runtimeHooked) {
-        return;
-      }
-
-      runtimeHooked = true;
-      const previous = window.cv.onRuntimeInitialized;
-      window.cv.onRuntimeInitialized = () => {
-        if (typeof previous === "function") {
-          previous();
-        }
-        done();
-      };
-    };
-
-    const check = () => {
-      if (window.cv && typeof window.cv.Mat === "function") {
-        done();
-        return;
-      }
-
-      hookRuntimeInit();
-      if (Date.now() - start >= timeoutMs) {
-        done(new Error("OpenCV runtime nije spreman."));
+      if ((Date.now() - startedAt) >= timeoutMs) {
+        reject(new Error("MiniScanbot nije ucitan."));
         return;
       }
 
@@ -325,12 +271,18 @@ async function initScanner() {
     return;
   }
 
-  setSdkState("Ucitavam OpenCV i photoscan.js...");
-  await waitForPhotoScan();
-  await waitForOpenCv();
-  state.scanner = window.MiniScanbot.create();
+  setSdkState("Ucitavam OpenCV.js scanner...");
+  await waitForMiniScanbot();
+  state.scanner = await window.MiniScanbot.initialize({
+    maxDetectionDimension: 1024,
+    minAreaRatio: 0.07,
+    minLongShortRatio: 1.14,
+    fallbackAreaRatio: 0.045,
+    cannyLow: 48,
+    cannyHighMultiplier: 2.45,
+  });
   state.engineReady = true;
-  setSdkState("Engine spreman");
+  setSdkState("OpenCV SDK spreman");
 }
 
 function ensureFrameBuffer() {
@@ -347,46 +299,25 @@ function ensureFrameBuffer() {
   }
 }
 
-function detectCorners(source) {
+function detectDocument(source) {
   try {
-    const dims = getSourceDimensions(source);
-    if (!dims) {
-      return null;
-    }
-
-    const corners = state.scanner.findReceiptCorners(source);
-    if (!corners) {
-      return null;
-    }
-
-    const metrics = getContourMetrics(corners, dims.width, dims.height);
-    if (isLikelyReceiptContour(metrics)) {
-      return corners;
-    }
-
-    return null;
+    return state.scanner.detectDocument(source);
   } catch (error) {
     return null;
   }
 }
 
-function pointDistance(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
+function extractDocumentDataUrl(source, corners, options) {
+  return state.scanner.extractReceiptDataUrl(source, corners, options);
 }
 
-function polygonArea(points) {
-  let area = 0;
-  for (let i = 0; i < points.length; i += 1) {
-    const current = points[i];
-    const next = points[(i + 1) % points.length];
-    area += current.x * next.y - next.x * current.y;
-  }
-  return Math.abs(area / 2);
-}
-
-function extractDocument(source, corners) {
-  const cropped = state.scanner.extractReceipt(source, corners);
-  return cropped ? cropped.toDataURL("image/jpeg", 0.92) : null;
+function createCanvasSnapshot(sourceCanvas) {
+  const snapshot = document.createElement("canvas");
+  snapshot.width = sourceCanvas.width;
+  snapshot.height = sourceCanvas.height;
+  const context = snapshot.getContext("2d");
+  context.drawImage(sourceCanvas, 0, 0, snapshot.width, snapshot.height);
+  return snapshot;
 }
 
 async function stopCameraScanner() {
@@ -409,22 +340,41 @@ async function stopCameraScanner() {
   refs.stopCameraBtn.disabled = true;
 
   state.stableFrames = 0;
+  state.framesWithoutDetection = 0;
   state.runningDetection = false;
+  state.cropInFlight = false;
   clearCameraOverlay();
   setCameraBadge("Neaktivno");
   setActivity("Kamera zaustavljena");
 }
 
 async function autoCropCurrentFrame(corners) {
-  if (!state.frameCanvas) {
+  if (!state.frameCanvas || state.cropInFlight || !corners) {
     return;
   }
 
-  refs.originalResult.src = state.frameCanvas.toDataURL("image/jpeg", 0.92);
-  const cropDataUrl = extractDocument(state.frameCanvas, corners);
-  if (cropDataUrl) {
-    refs.croppedResult.src = cropDataUrl;
-    setActivity("Auto-crop zavrsen (kamera)");
+  state.cropInFlight = true;
+
+  try {
+    const snapshot = createCanvasSnapshot(state.frameCanvas);
+    refs.originalResult.src = snapshot.toDataURL("image/jpeg", 0.92);
+
+    const cropDataUrl = extractDocumentDataUrl(snapshot, corners, {
+      mode: "color",
+      jpegQuality: 0.93,
+    });
+
+    if (cropDataUrl) {
+      refs.croppedResult.src = cropDataUrl;
+      setActivity("Auto-crop zavrsen (kamera)");
+    }
+  } finally {
+    state.cropInFlight = false;
+    window.setTimeout(() => {
+      if (state.cameraStream) {
+        setCameraBadge("Aktivno");
+      }
+    }, 900);
   }
 }
 
@@ -447,56 +397,55 @@ async function runCameraDetectionTick() {
   state.frameCtx.drawImage(refs.cameraPreview, 0, 0, state.frameCanvas.width, state.frameCanvas.height);
 
   state.runningDetection = true;
-  let triggerCrop = false;
-  let cropCorners = null;
+  let detection = null;
 
   try {
-    const corners = detectCorners(state.frameCanvas);
-    if (corners) {
-      state.lastCameraCorners = corners;
-      drawCameraOverlay();
-      setDetection("Dokument pronadjen");
-
-      const points = cornersToArray(corners);
-      const areaRatio = polygonArea(points) / (state.frameCanvas.width * state.frameCanvas.height);
-      if (areaRatio > 0.14) {
-        state.stableFrames += 1;
-      } else {
-        state.stableFrames = 0;
-      }
-
-      if (state.stableFrames >= 4 && Date.now() > state.cooldownUntil) {
-        state.cooldownUntil = Date.now() + 2600;
-        state.stableFrames = 0;
-        triggerCrop = true;
-        cropCorners = corners;
-        setCameraBadge("Auto-crop...");
-      }
-    } else {
-      state.stableFrames = 0;
-      // Zadrzi poslednji overlay kratko da ne treperi, samo resetuj kad dugo nema
-      if (!state.lastCameraCorners) {
-        clearCameraOverlay();
-      }
-      setDetection("Cekam dokument");
-    }
+    detection = detectDocument(state.frameCanvas);
   } catch (error) {
     console.error("Camera detection error", error);
     setDetection("Greska detekcije");
   } finally {
-    // Lokot se pusta odmah — petlja nastavlja detekciju bez obzira na crop
     state.runningDetection = false;
   }
 
-  // Auto-crop se izvrsava VAN lokota da detekacija tece neprekidno
-  if (triggerCrop) {
-    await autoCropCurrentFrame(cropCorners);
-    window.setTimeout(() => {
-      if (state.cameraStream) {
-        setCameraBadge("Aktivno");
-      }
-    }, 900);
+  if (detection && detection.corners) {
+    const smoothedCorners = blendCorners(state.lastCameraCorners, detection.corners, state.cornerSmoothing);
+    state.lastCameraCorners = smoothedCorners;
+    state.framesWithoutDetection = 0;
+    drawCameraOverlay();
+
+    const confidence = Math.round((detection.confidence || 0) * 100);
+    setDetection(`Dokument pronadjen (${confidence}%)`);
+
+    if ((detection.confidence || 0) >= 0.55 && (detection.areaRatio || 0) >= 0.12) {
+      state.stableFrames += 1;
+    } else {
+      state.stableFrames = 0;
+    }
+
+    if (
+      state.stableFrames >= state.requiredStableFrames
+      && Date.now() > state.cooldownUntil
+      && !state.cropInFlight
+    ) {
+      state.cooldownUntil = Date.now() + 2500;
+      state.stableFrames = 0;
+      setCameraBadge("Auto-crop...");
+      const cornersSnapshot = cloneCorners(smoothedCorners);
+      window.setTimeout(() => {
+        void autoCropCurrentFrame(cornersSnapshot);
+      }, 0);
+    }
+
+    return;
   }
+
+  state.stableFrames = 0;
+  state.framesWithoutDetection += 1;
+  if (state.framesWithoutDetection >= state.overlayHoldFrames) {
+    clearCameraOverlay();
+  }
+  setDetection("Cekam dokument");
 }
 
 function cameraLoop() {
@@ -512,7 +461,11 @@ async function startCameraScanner() {
     await stopCameraScanner();
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } },
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
       audio: false,
     });
 
@@ -572,9 +525,9 @@ async function processUpload(file) {
     refs.originalResult.src = dataUrl;
 
     const image = await loadImageFromDataUrl(dataUrl);
-    const corners = detectCorners(image);
+    const detection = detectDocument(image);
 
-    if (!corners) {
+    if (!detection || !detection.corners) {
       setUploadBadge("Nije nadjen dokument");
       setDetection("Nije detektovano");
       refs.croppedResult.removeAttribute("src");
@@ -582,12 +535,16 @@ async function processUpload(file) {
       return;
     }
 
-    state.lastUploadCorners = corners;
+    state.lastUploadCorners = cloneCorners(detection.corners);
     drawUploadOverlay();
     setUploadBadge("Ivice detektovane");
-    setDetection("Dokument pronadjen");
+    setDetection(`Dokument pronadjen (${Math.round((detection.confidence || 0) * 100)}%)`);
 
-    const cropDataUrl = extractDocument(image, corners);
+    const cropDataUrl = extractDocumentDataUrl(image, detection.corners, {
+      mode: "color",
+      jpegQuality: 0.93,
+    });
+
     if (cropDataUrl) {
       refs.croppedResult.src = cropDataUrl;
       setUploadBadge("Auto-crop zavrsen");
@@ -638,6 +595,9 @@ function wireEvents() {
   window.addEventListener("beforeunload", () => {
     if (state.cameraStream) {
       state.cameraStream.getTracks().forEach((track) => track.stop());
+    }
+    if (state.scanner && typeof state.scanner.destroy === "function") {
+      state.scanner.destroy();
     }
   });
 }

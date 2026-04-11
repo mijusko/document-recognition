@@ -1,16 +1,27 @@
-# photoscan.js Document Scanner - Vanilla Web App
+# OpenCV.js Document Scanner (Scanbot-like)
 
-Projekat je potpuno prebacen na **photoscan.js + OpenCV.js**.
+Projekat je sada potpuno prebacen na cist OpenCV.js scanner bez legacy slojeva.
 
 ## Sta sada radi
 
-- Kamera skeniranje u browseru (`getUserMedia` + `photoscan.js`)
-- Live detekcija ivica dokumenta na video frame-ovima
-- Iscrtavanje ivica (polygon overlay) preko kamere
-- Auto-crop kada je detekcija stabilna kroz vise frame-ova
-- Upload slike dokumenta
-- Detekcija ivica na upload slici
-- Automatski crop i prikaz rezultata
+- Live detekcija ivica dokumenta preko kamere
+- Stabilizacija kontura kroz vise frame-ova
+- Auto-crop kada je dokument stabilno pronadjen
+- Upload slike + detekcija + perspektivni crop
+- Jedinstven SDK sloj: `mini-scanbot.js`
+
+## Arhitektura
+
+- `mini-scanbot.js`
+  - Standalone OpenCV.js engine
+  - Downscaled detekcija za veci FPS
+  - Dynamic Canny threshold na osnovu osvetljenja
+  - Contour scoring (area, ratio, ugaoni kvalitet, pozicija)
+  - Perspektivni crop (`warpPerspective`)
+- `script.js`
+  - Kamera loop, overlay, auto-capture, upload tok
+- `index.html`
+  - UI + ucitavanje OpenCV.js i MiniScanbot SDK
 
 ## Pokretanje
 
@@ -26,13 +37,6 @@ python -m http.server 8080
 http://localhost:8080
 ```
 
-## Tehnologija
-
-- OpenCV.js preko CDN skripte:
-- `https://docs.opencv.org/4.7.0/opencv.js`
-- photoscan.js lokalni engine u projektu:
-- `./photoscan.js`
-
 ## Napomena za produkciju
 
-Za produkciju hostuj OpenCV i photoscan.js bundle lokalno na svom domenu.
+Za produkciju hostuj OpenCV.js i `mini-scanbot.js` lokalno na svom domenu.
