@@ -366,15 +366,14 @@
   }
 
   function estimateOutputSize(corners, maxDimension) {
-    const width = Math.max(
-      pointDistance(corners.topLeft, corners.topRight),
-      pointDistance(corners.bottomLeft, corners.bottomRight),
-    );
+    const topWidth = pointDistance(corners.topLeft, corners.topRight);
+    const bottomWidth = pointDistance(corners.bottomLeft, corners.bottomRight);
+    const leftHeight = pointDistance(corners.topLeft, corners.bottomLeft);
+    const rightHeight = pointDistance(corners.topRight, corners.bottomRight);
 
-    const height = Math.max(
-      pointDistance(corners.topLeft, corners.bottomLeft),
-      pointDistance(corners.topRight, corners.bottomRight),
-    );
+    // Average opposite sides to reduce warp stretch and keep natural proportions.
+    const width = (topWidth + bottomWidth) / 2;
+    const height = (leftHeight + rightHeight) / 2;
 
     const baseWidth = Math.max(220, Math.round(width));
     const baseHeight = Math.max(220, Math.round(height));
@@ -389,6 +388,38 @@
       width: Math.max(220, Math.round(baseWidth * ratio)),
       height: Math.max(220, Math.round(baseHeight * ratio)),
     };
+  }
+
+  function normalizeFilterMode(mode) {
+    const value = String(mode || "document").trim().toLowerCase();
+
+    if (value === "b&w" || value === "bw" || value === "blackwhite" || value === "black-white") {
+      return "bw";
+    }
+
+    if (value === "grey") {
+      return "gray";
+    }
+
+    if (value === "enchanced") {
+      return "enhanced";
+    }
+
+    if (value === "color") {
+      return "original";
+    }
+
+    if (
+      value === "original"
+      || value === "document"
+      || value === "enhanced"
+      || value === "super"
+      || value === "gray"
+    ) {
+      return value;
+    }
+
+    return "document";
   }
 
   function waitForOpenCv(timeoutMs) {
@@ -707,11 +738,12 @@
 
       const options = mergeOptions(
         {
-          mode: "color",
+          mode: "document",
           jpegQuality: this.options.defaultJpegQuality,
         },
         extractOptions,
       );
+      const mode = normalizeFilterMode(options.mode);
 
       let sourceMat;
       let transform;
@@ -719,8 +751,11 @@
       let destinationQuad;
       let warped;
       let gray;
+      let blurGray;
       let threshold;
       let converted;
+      let processedColor;
+      let blurredColor;
       let renderMat;
 
       try {
@@ -763,11 +798,15 @@
         );
 
         renderMat = warped;
-        if (options.mode === "gray" || options.mode === "bw") {
+        if (mode === "gray" || mode === "bw" || mode === "document") {
           gray = new globalObject.cv.Mat();
           globalObject.cv.cvtColor(warped, gray, globalObject.cv.COLOR_RGBA2GRAY, 0);
 
-          if (options.mode === "bw") {
+          if (mode === "gray") {
+            converted = new globalObject.cv.Mat();
+            globalObject.cv.cvtColor(gray, converted, globalObject.cv.COLOR_GRAY2RGBA, 0);
+            renderMat = converted;
+          } else if (mode === "bw") {
             threshold = new globalObject.cv.Mat();
             globalObject.cv.adaptiveThreshold(
               gray,
@@ -776,16 +815,67 @@
               globalObject.cv.ADAPTIVE_THRESH_GAUSSIAN_C,
               globalObject.cv.THRESH_BINARY,
               31,
-              15,
+              14,
             );
+            globalObject.cv.medianBlur(threshold, threshold, 3);
             converted = new globalObject.cv.Mat();
             globalObject.cv.cvtColor(threshold, converted, globalObject.cv.COLOR_GRAY2RGBA, 0);
+            renderMat = converted;
           } else {
-            converted = new globalObject.cv.Mat();
-            globalObject.cv.cvtColor(gray, converted, globalObject.cv.COLOR_GRAY2RGBA, 0);
-          }
+            blurGray = new globalObject.cv.Mat();
+            globalObject.cv.GaussianBlur(
+              gray,
+              blurGray,
+              new globalObject.cv.Size(3, 3),
+              0,
+              0,
+              globalObject.cv.BORDER_DEFAULT,
+            );
 
-          renderMat = converted;
+            threshold = new globalObject.cv.Mat();
+            globalObject.cv.adaptiveThreshold(
+              blurGray,
+              threshold,
+              255,
+              globalObject.cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+              globalObject.cv.THRESH_BINARY,
+              35,
+              11,
+            );
+            globalObject.cv.medianBlur(threshold, threshold, 3);
+            converted = new globalObject.cv.Mat();
+            globalObject.cv.cvtColor(threshold, converted, globalObject.cv.COLOR_GRAY2RGBA, 0);
+            renderMat = converted;
+          }
+        } else if (mode === "enhanced" || mode === "super") {
+          processedColor = new globalObject.cv.Mat();
+          blurredColor = new globalObject.cv.Mat();
+
+          const alpha = mode === "super" ? 1.34 : 1.18;
+          const beta = mode === "super" ? 18 : 10;
+          const sharpenWeight = mode === "super" ? 1.58 : 1.36;
+          const blurWeight = mode === "super" ? -0.58 : -0.36;
+          const blurSigma = mode === "super" ? 1.8 : 1.1;
+
+          globalObject.cv.convertScaleAbs(warped, processedColor, alpha, beta);
+          globalObject.cv.GaussianBlur(
+            processedColor,
+            blurredColor,
+            new globalObject.cv.Size(0, 0),
+            blurSigma,
+            0,
+            globalObject.cv.BORDER_DEFAULT,
+          );
+          globalObject.cv.addWeighted(
+            processedColor,
+            sharpenWeight,
+            blurredColor,
+            blurWeight,
+            0,
+            processedColor,
+          );
+
+          renderMat = processedColor;
         }
 
         const canvas = globalObject.document.createElement("canvas");
@@ -800,8 +890,11 @@
         if (destinationQuad) destinationQuad.delete();
         if (warped) warped.delete();
         if (gray) gray.delete();
+        if (blurGray) blurGray.delete();
         if (threshold) threshold.delete();
         if (converted) converted.delete();
+        if (processedColor) processedColor.delete();
+        if (blurredColor) blurredColor.delete();
       }
     }
 

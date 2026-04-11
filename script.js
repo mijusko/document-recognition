@@ -17,6 +17,9 @@ const state = {
   cornerSmoothing: 0.34,
   lastUploadCorners: null,
   lastCameraCorners: null,
+  currentFilter: "document",
+  lastResultSourceCanvas: null,
+  lastResultCorners: null,
 };
 
 const refs = {
@@ -37,9 +40,12 @@ const refs = {
   uploadPreview: document.querySelector("#uploadPreview"),
   uploadOverlay: document.querySelector("#uploadOverlay"),
   uploadPlaceholder: document.querySelector("#uploadPlaceholder"),
+  filterToolbar: document.querySelector("#filterToolbar"),
   originalResult: document.querySelector("#originalResult"),
   croppedResult: document.querySelector("#croppedResult"),
 };
+
+refs.filterButtons = Array.from(document.querySelectorAll(".filter-btn"));
 
 function setSdkState(text) {
   refs.sdkState.textContent = text;
@@ -311,6 +317,99 @@ function detectDocument(source) {
   }
 }
 
+function normalizeFilterName(rawFilter) {
+  const value = String(rawFilter || "document").trim().toLowerCase();
+
+  if (value === "b&w" || value === "bw") {
+    return "bw";
+  }
+
+  if (value === "grey") {
+    return "gray";
+  }
+
+  if (value === "enchanced") {
+    return "enhanced";
+  }
+
+  if (
+    value === "document"
+    || value === "enhanced"
+    || value === "super"
+    || value === "gray"
+    || value === "original"
+  ) {
+    return value;
+  }
+
+  return "document";
+}
+
+function setFilterButtonsDisabled(disabled) {
+  refs.filterButtons.forEach((button) => {
+    button.disabled = disabled;
+  });
+}
+
+function setActiveFilterButton(filterName) {
+  const normalized = normalizeFilterName(filterName);
+  refs.filterButtons.forEach((button) => {
+    const buttonFilter = normalizeFilterName(button.dataset.filter);
+    const active = buttonFilter === normalized;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function clearDetectedDocumentSource() {
+  state.lastResultSourceCanvas = null;
+  state.lastResultCorners = null;
+  setFilterButtonsDisabled(true);
+}
+
+function setDetectedDocumentSource(source, corners) {
+  const dims = getSourceDimensions(source);
+  if (!dims || !corners) {
+    return false;
+  }
+
+  const snapshot = document.createElement("canvas");
+  snapshot.width = dims.width;
+  snapshot.height = dims.height;
+  const context = snapshot.getContext("2d");
+  context.drawImage(source, 0, 0, snapshot.width, snapshot.height);
+
+  state.lastResultSourceCanvas = snapshot;
+  state.lastResultCorners = cloneCorners(corners);
+  setFilterButtonsDisabled(false);
+  return true;
+}
+
+function renderFilteredResult(filterName) {
+  if (!state.lastResultSourceCanvas || !state.lastResultCorners) {
+    return false;
+  }
+
+  const normalized = normalizeFilterName(filterName);
+  const cropDataUrl = extractDocumentDataUrl(
+    state.lastResultSourceCanvas,
+    state.lastResultCorners,
+    {
+      mode: normalized,
+      jpegQuality: normalized === "bw" || normalized === "document" || normalized === "gray" ? 0.92 : 0.94,
+    },
+  );
+
+  if (!cropDataUrl) {
+    return false;
+  }
+
+  refs.croppedResult.src = cropDataUrl;
+  state.currentFilter = normalized;
+  setActiveFilterButton(normalized);
+  return true;
+}
+
 function isLikelyFullReceiptDetection(detection) {
   if (!detection || !detection.corners) {
     return false;
@@ -383,13 +482,7 @@ async function autoCropCurrentFrame(corners) {
     const snapshot = createCanvasSnapshot(state.frameCanvas);
     refs.originalResult.src = snapshot.toDataURL("image/jpeg", 0.92);
 
-    const cropDataUrl = extractDocumentDataUrl(snapshot, corners, {
-      mode: "color",
-      jpegQuality: 0.93,
-    });
-
-    if (cropDataUrl) {
-      refs.croppedResult.src = cropDataUrl;
+    if (setDetectedDocumentSource(snapshot, corners) && renderFilteredResult(state.currentFilter)) {
       setActivity("Auto-crop zavrsen (kamera)");
     }
   } finally {
@@ -554,6 +647,7 @@ async function processUpload(file) {
     if (!detection || !detection.corners || !isLikelyFullReceiptDetection(detection)) {
       setUploadBadge(detection && detection.corners ? "Nadjen QR, ne ceo racun" : "Nije nadjen dokument");
       setDetection(detection && detection.corners ? "Detektovan je QR region" : "Nije detektovano");
+      clearDetectedDocumentSource();
       refs.croppedResult.removeAttribute("src");
       clearUploadOverlay();
       return;
@@ -564,13 +658,7 @@ async function processUpload(file) {
     setUploadBadge("Ivice detektovane");
     setDetection(`Dokument pronadjen (${Math.round((detection.confidence || 0) * 100)}%)`);
 
-    const cropDataUrl = extractDocumentDataUrl(image, detection.corners, {
-      mode: "color",
-      jpegQuality: 0.93,
-    });
-
-    if (cropDataUrl) {
-      refs.croppedResult.src = cropDataUrl;
+    if (setDetectedDocumentSource(image, detection.corners) && renderFilteredResult(state.currentFilter)) {
       setUploadBadge("Auto-crop zavrsen");
       setActivity("Upload detekcija i crop zavrseni");
     } else {
@@ -607,6 +695,29 @@ function wireEvents() {
     input.value = "";
   });
 
+  if (refs.filterToolbar) {
+    refs.filterToolbar.addEventListener("click", (event) => {
+      const button = event.target.closest(".filter-btn");
+      if (!button) {
+        return;
+      }
+
+      if (!state.lastResultSourceCanvas || !state.lastResultCorners) {
+        setActivity("Nema detektovanog dokumenta za filter.");
+        return;
+      }
+
+      const requestedFilter = normalizeFilterName(button.dataset.filter);
+      const label = button.textContent.trim();
+
+      setActivity(`Primenjujem filter: ${label}`);
+      const ok = renderFilteredResult(requestedFilter);
+      if (!ok) {
+        setActivity("Filter neuspesan.");
+      }
+    });
+  }
+
   refs.uploadPreview.addEventListener("load", () => {
     drawUploadOverlay();
   });
@@ -628,6 +739,8 @@ function wireEvents() {
 
 async function bootstrap() {
   wireEvents();
+  setFilterButtonsDisabled(true);
+  setActiveFilterButton(state.currentFilter);
 
   try {
     await initScanner();
