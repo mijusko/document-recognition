@@ -14,6 +14,16 @@
     cannyHighMultiplier: 2.45,
     approxEpsilonRatio: 0.018,
     minPerimeterPx: 120,
+    minConfidence: 0.44,
+    enhancedPassBoost: 0.05,
+    enhancedCannyScale: 0.82,
+    adaptiveBlockSize: 41,
+    adaptiveC: 7,
+    qrShapeRatioMax: 1.27,
+    qrAreaRatioMax: 0.24,
+    qrHardRejectShapeRatio: 1.16,
+    qrHardRejectAreaRatio: 0.14,
+    qrEdgeDensityMin: 0.185,
     defaultJpegQuality: 0.92,
   });
 
@@ -191,6 +201,170 @@
     };
   }
 
+  function toClampedPoint(point, frameWidth, frameHeight) {
+    return {
+      x: Math.round(clamp(point.x, 0, frameWidth - 1)),
+      y: Math.round(clamp(point.y, 0, frameHeight - 1)),
+    };
+  }
+
+  function estimateQuadEdgeDensity(corners, edgeMask, frameWidth, frameHeight) {
+    let quadMask;
+    let intersection;
+    let contour;
+
+    try {
+      const topLeft = toClampedPoint(corners.topLeft, frameWidth, frameHeight);
+      const topRight = toClampedPoint(corners.topRight, frameWidth, frameHeight);
+      const bottomRight = toClampedPoint(corners.bottomRight, frameWidth, frameHeight);
+      const bottomLeft = toClampedPoint(corners.bottomLeft, frameWidth, frameHeight);
+
+      contour = globalObject.cv.matFromArray(4, 1, globalObject.cv.CV_32SC2, [
+        topLeft.x,
+        topLeft.y,
+        topRight.x,
+        topRight.y,
+        bottomRight.x,
+        bottomRight.y,
+        bottomLeft.x,
+        bottomLeft.y,
+      ]);
+
+      quadMask = globalObject.cv.Mat.zeros(frameHeight, frameWidth, globalObject.cv.CV_8UC1);
+      globalObject.cv.fillConvexPoly(quadMask, contour, new globalObject.cv.Scalar(255), globalObject.cv.LINE_8, 0);
+
+      intersection = new globalObject.cv.Mat();
+      globalObject.cv.bitwise_and(edgeMask, quadMask, intersection);
+
+      const regionPixels = Math.max(1, globalObject.cv.countNonZero(quadMask));
+      const edgePixels = globalObject.cv.countNonZero(intersection);
+      return edgePixels / regionPixels;
+    } catch (error) {
+      return 0;
+    } finally {
+      if (quadMask) quadMask.delete();
+      if (intersection) intersection.delete();
+      if (contour) contour.delete();
+    }
+  }
+
+  function isLikelyQrOnlyCandidate(corners, metrics, edgeMask, frameWidth, frameHeight, options) {
+    if (!metrics) {
+      return false;
+    }
+
+    if (metrics.longShortRatio > options.qrShapeRatioMax || metrics.areaRatio > options.qrAreaRatioMax) {
+      return false;
+    }
+
+    if (
+      metrics.longShortRatio <= options.qrHardRejectShapeRatio
+      && metrics.areaRatio <= options.qrHardRejectAreaRatio
+    ) {
+      return true;
+    }
+
+    const edgeDensity = estimateQuadEdgeDensity(corners, edgeMask, frameWidth, frameHeight);
+    return edgeDensity >= options.qrEdgeDensityMin;
+  }
+
+  function pickCandidateFromMask(edgeMask, frameWidth, frameHeight, options) {
+    let contours;
+    let hierarchy;
+
+    try {
+      contours = new globalObject.cv.MatVector();
+      hierarchy = new globalObject.cv.Mat();
+
+      globalObject.cv.findContours(
+        edgeMask,
+        contours,
+        hierarchy,
+        globalObject.cv.RETR_LIST,
+        globalObject.cv.CHAIN_APPROX_SIMPLE,
+      );
+
+      let bestCandidate = null;
+      let bestScore = -Infinity;
+      let fallbackCandidate = null;
+      let fallbackArea = 0;
+
+      for (let index = 0; index < contours.size(); index += 1) {
+        const contour = contours.get(index);
+        const approx = new globalObject.cv.Mat();
+
+        try {
+          const contourArea = globalObject.cv.contourArea(contour, false);
+          if (contourArea <= 0) {
+            continue;
+          }
+
+          const perimeter = globalObject.cv.arcLength(contour, true);
+          if (perimeter < options.minPerimeterPx) {
+            continue;
+          }
+
+          globalObject.cv.approxPolyDP(
+            contour,
+            approx,
+            options.approxEpsilonRatio * perimeter,
+            true,
+          );
+
+          if (approx.rows !== 4 || !globalObject.cv.isContourConvex(approx)) {
+            continue;
+          }
+
+          const corners = contourToCorners(approx);
+          if (!corners) {
+            continue;
+          }
+
+          const metrics = evaluateCorners(corners, frameWidth, frameHeight, options);
+          if (isLikelyQrOnlyCandidate(corners, metrics, edgeMask, frameWidth, frameHeight, options)) {
+            continue;
+          }
+
+          if (metrics.fallbackAccepted && metrics.area > fallbackArea) {
+            fallbackArea = metrics.area;
+            fallbackCandidate = {
+              corners,
+              metrics,
+            };
+          }
+
+          if (!metrics.accepted) {
+            continue;
+          }
+
+          const weightedScore =
+            (metrics.score * 100) +
+            (metrics.areaRatio * 35) +
+            (metrics.longShortRatio * 7);
+
+          if (weightedScore > bestScore) {
+            bestScore = weightedScore;
+            bestCandidate = {
+              corners,
+              metrics,
+            };
+          }
+        } finally {
+          approx.delete();
+          contour.delete();
+        }
+      }
+
+      return {
+        bestCandidate,
+        fallbackCandidate,
+      };
+    } finally {
+      if (contours) contours.delete();
+      if (hierarchy) hierarchy.delete();
+    }
+  }
+
   function estimateOutputSize(corners, maxDimension) {
     const width = Math.max(
       pointDistance(corners.topLeft, corners.topRight),
@@ -314,9 +488,18 @@
       let gray;
       let blurred;
       let edges;
-      let morphed;
-      let contours;
-      let hierarchy;
+      let quickMask;
+      let equalized;
+      let enhancedBlur;
+      let enhancedEdges;
+      let gradientX;
+      let gradientY;
+      let absGradientX;
+      let absGradientY;
+      let gradientMix;
+      let gradientMask;
+      let adaptiveMask;
+      let enhancedMask;
       let kernel;
 
       try {
@@ -324,9 +507,7 @@
         gray = new globalObject.cv.Mat();
         blurred = new globalObject.cv.Mat();
         edges = new globalObject.cv.Mat();
-        morphed = new globalObject.cv.Mat();
-        contours = new globalObject.cv.MatVector();
-        hierarchy = new globalObject.cv.Mat();
+        quickMask = new globalObject.cv.Mat();
         kernel = globalObject.cv.getStructuringElement(
           globalObject.cv.MORPH_RECT,
           new globalObject.cv.Size(3, 3),
@@ -353,89 +534,124 @@
         globalObject.cv.Canny(blurred, edges, lowThreshold, highThreshold);
         globalObject.cv.morphologyEx(
           edges,
-          morphed,
+          quickMask,
           globalObject.cv.MORPH_CLOSE,
           kernel,
         );
 
-        globalObject.cv.findContours(
-          morphed,
-          contours,
-          hierarchy,
-          globalObject.cv.RETR_LIST,
-          globalObject.cv.CHAIN_APPROX_SIMPLE,
+        const quickSelection = pickCandidateFromMask(
+          quickMask,
+          detectWidth,
+          detectHeight,
+          this.options,
         );
 
-        let bestCandidate = null;
-        let bestScore = -Infinity;
-        let fallbackCandidate = null;
-        let fallbackArea = 0;
+        let selected = quickSelection.bestCandidate || quickSelection.fallbackCandidate;
 
-        for (let index = 0; index < contours.size(); index += 1) {
-          const contour = contours.get(index);
-          const approx = new globalObject.cv.Mat();
+        if (!selected || selected.metrics.score < this.options.minConfidence) {
+          equalized = new globalObject.cv.Mat();
+          enhancedBlur = new globalObject.cv.Mat();
+          enhancedEdges = new globalObject.cv.Mat();
+          gradientX = new globalObject.cv.Mat();
+          gradientY = new globalObject.cv.Mat();
+          absGradientX = new globalObject.cv.Mat();
+          absGradientY = new globalObject.cv.Mat();
+          gradientMix = new globalObject.cv.Mat();
+          gradientMask = new globalObject.cv.Mat();
+          adaptiveMask = new globalObject.cv.Mat();
+          enhancedMask = new globalObject.cv.Mat();
 
-          try {
-            const contourArea = globalObject.cv.contourArea(contour, false);
-            if (contourArea <= 0) {
-              continue;
+          globalObject.cv.equalizeHist(gray, equalized);
+          globalObject.cv.GaussianBlur(
+            equalized,
+            enhancedBlur,
+            new globalObject.cv.Size(5, 5),
+            0,
+            0,
+            globalObject.cv.BORDER_DEFAULT,
+          );
+
+          const enhancedLow = clamp(lowThreshold * this.options.enhancedCannyScale, 24, 105);
+          const enhancedHigh = Math.max(enhancedLow + 42, enhancedLow * this.options.cannyHighMultiplier);
+
+          globalObject.cv.Canny(enhancedBlur, enhancedEdges, enhancedLow, enhancedHigh);
+
+          globalObject.cv.Sobel(
+            enhancedBlur,
+            gradientX,
+            globalObject.cv.CV_16S,
+            1,
+            0,
+            3,
+            1,
+            0,
+            globalObject.cv.BORDER_DEFAULT,
+          );
+          globalObject.cv.Sobel(
+            enhancedBlur,
+            gradientY,
+            globalObject.cv.CV_16S,
+            0,
+            1,
+            3,
+            1,
+            0,
+            globalObject.cv.BORDER_DEFAULT,
+          );
+          globalObject.cv.convertScaleAbs(gradientX, absGradientX);
+          globalObject.cv.convertScaleAbs(gradientY, absGradientY);
+          globalObject.cv.addWeighted(absGradientX, 0.5, absGradientY, 0.5, 0, gradientMix);
+          globalObject.cv.threshold(
+            gradientMix,
+            gradientMask,
+            0,
+            255,
+            globalObject.cv.THRESH_BINARY + globalObject.cv.THRESH_OTSU,
+          );
+
+          globalObject.cv.adaptiveThreshold(
+            enhancedBlur,
+            adaptiveMask,
+            255,
+            globalObject.cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+            globalObject.cv.THRESH_BINARY_INV,
+            this.options.adaptiveBlockSize,
+            this.options.adaptiveC,
+          );
+
+          globalObject.cv.bitwise_or(enhancedEdges, gradientMask, enhancedMask);
+          globalObject.cv.bitwise_or(enhancedMask, adaptiveMask, enhancedMask);
+          globalObject.cv.morphologyEx(
+            enhancedMask,
+            enhancedMask,
+            globalObject.cv.MORPH_CLOSE,
+            kernel,
+          );
+          globalObject.cv.dilate(enhancedMask, enhancedMask, kernel);
+
+          const enhancedSelection = pickCandidateFromMask(
+            enhancedMask,
+            detectWidth,
+            detectHeight,
+            this.options,
+          );
+          const enhancedCandidate = enhancedSelection.bestCandidate || enhancedSelection.fallbackCandidate;
+
+          if (enhancedCandidate) {
+            if (!selected) {
+              selected = enhancedCandidate;
+            } else {
+              const baseScore = selected.metrics.score;
+              if (
+                baseScore < this.options.minConfidence
+                || enhancedCandidate.metrics.score >= (baseScore + this.options.enhancedPassBoost)
+              ) {
+                selected = enhancedCandidate;
+              }
             }
-
-            const perimeter = globalObject.cv.arcLength(contour, true);
-            if (perimeter < this.options.minPerimeterPx) {
-              continue;
-            }
-
-            globalObject.cv.approxPolyDP(
-              contour,
-              approx,
-              this.options.approxEpsilonRatio * perimeter,
-              true,
-            );
-
-            if (approx.rows !== 4 || !globalObject.cv.isContourConvex(approx)) {
-              continue;
-            }
-
-            const corners = contourToCorners(approx);
-            if (!corners) {
-              continue;
-            }
-
-            const metrics = evaluateCorners(
-              corners,
-              detectWidth,
-              detectHeight,
-              this.options,
-            );
-
-            if (metrics.fallbackAccepted && metrics.area > fallbackArea) {
-              fallbackArea = metrics.area;
-              fallbackCandidate = {
-                corners,
-                metrics,
-              };
-            }
-
-            if (!metrics.accepted) {
-              continue;
-            }
-
-            const weightedScore = (metrics.score * 100) + (metrics.areaRatio * 35);
-            if (weightedScore > bestScore) {
-              bestScore = weightedScore;
-              bestCandidate = {
-                corners,
-                metrics,
-              };
-            }
-          } finally {
-            approx.delete();
-            contour.delete();
           }
         }
 
-        const selected = bestCandidate || fallbackCandidate;
         if (!selected) {
           return null;
         }
@@ -459,9 +675,18 @@
         if (gray) gray.delete();
         if (blurred) blurred.delete();
         if (edges) edges.delete();
-        if (morphed) morphed.delete();
-        if (contours) contours.delete();
-        if (hierarchy) hierarchy.delete();
+        if (quickMask) quickMask.delete();
+        if (equalized) equalized.delete();
+        if (enhancedBlur) enhancedBlur.delete();
+        if (enhancedEdges) enhancedEdges.delete();
+        if (gradientX) gradientX.delete();
+        if (gradientY) gradientY.delete();
+        if (absGradientX) absGradientX.delete();
+        if (absGradientY) absGradientY.delete();
+        if (gradientMix) gradientMix.delete();
+        if (gradientMask) gradientMask.delete();
+        if (adaptiveMask) adaptiveMask.delete();
+        if (enhancedMask) enhancedMask.delete();
         if (kernel) kernel.delete();
       }
     }

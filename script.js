@@ -276,10 +276,14 @@ async function initScanner() {
   state.scanner = await window.MiniScanbot.initialize({
     maxDetectionDimension: 1024,
     minAreaRatio: 0.07,
-    minLongShortRatio: 1.14,
+    minLongShortRatio: 1.18,
     fallbackAreaRatio: 0.045,
     cannyLow: 48,
     cannyHighMultiplier: 2.45,
+    minConfidence: 0.46,
+    qrShapeRatioMax: 1.27,
+    qrAreaRatioMax: 0.24,
+    qrEdgeDensityMin: 0.19,
   });
   state.engineReady = true;
   setSdkState("OpenCV SDK spreman");
@@ -305,6 +309,26 @@ function detectDocument(source) {
   } catch (error) {
     return null;
   }
+}
+
+function isLikelyFullReceiptDetection(detection) {
+  if (!detection || !detection.corners) {
+    return false;
+  }
+
+  const areaRatio = detection.areaRatio || 0;
+  const longShortRatio = detection.longShortRatio || 0;
+
+  // Near-square, small regions are usually QR blocks, not the full receipt.
+  if (longShortRatio < 1.24 && areaRatio < 0.24) {
+    return false;
+  }
+
+  if (areaRatio < 0.085) {
+    return false;
+  }
+
+  return true;
 }
 
 function extractDocumentDataUrl(source, corners, options) {
@@ -408,7 +432,7 @@ async function runCameraDetectionTick() {
     state.runningDetection = false;
   }
 
-  if (detection && detection.corners) {
+  if (detection && detection.corners && isLikelyFullReceiptDetection(detection)) {
     const smoothedCorners = blendCorners(state.lastCameraCorners, detection.corners, state.cornerSmoothing);
     state.lastCameraCorners = smoothedCorners;
     state.framesWithoutDetection = 0;
@@ -445,7 +469,7 @@ async function runCameraDetectionTick() {
   if (state.framesWithoutDetection >= state.overlayHoldFrames) {
     clearCameraOverlay();
   }
-  setDetection("Cekam dokument");
+  setDetection(detection && detection.corners ? "Ignorisem QR, trazim ceo racun" : "Cekam dokument");
 }
 
 function cameraLoop() {
@@ -527,9 +551,9 @@ async function processUpload(file) {
     const image = await loadImageFromDataUrl(dataUrl);
     const detection = detectDocument(image);
 
-    if (!detection || !detection.corners) {
-      setUploadBadge("Nije nadjen dokument");
-      setDetection("Nije detektovano");
+    if (!detection || !detection.corners || !isLikelyFullReceiptDetection(detection)) {
+      setUploadBadge(detection && detection.corners ? "Nadjen QR, ne ceo racun" : "Nije nadjen dokument");
+      setDetection(detection && detection.corners ? "Detektovan je QR region" : "Nije detektovano");
       refs.croppedResult.removeAttribute("src");
       clearUploadOverlay();
       return;
